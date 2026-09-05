@@ -1,0 +1,31 @@
+# ghost_writer configuration
+# Copy this file to config.yaml and adjust paths for your machine.
+
+llama:
+  server_exe: "C:\\path\\to\\llama-server.exe"
+  model_path: "C:\\path\\to\\models\\your-model.gguf"
+  draft_model_path: ""
+  spec_type: "none"
+  host: "127.0.0.1"
+  port: 8080
+  ctx_size: 20480
+  gpu_layers: 999
+  n_cpu_moe: 999
+  flash_attn: "auto"
+  reasoning: "off"
+  extra_args: []
+
+generation:
+  temperature: 0.8
+  top_p: 0.95
+  max_tokens: 3072
+
+research:
+  web_enabled: true
+  max_queries: 5
+  results_per_query: 3
+  pages_per_query: 2
+
+paths:
+  projects_dir: "projects"
+  series_dir: "series"

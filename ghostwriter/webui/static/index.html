@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ghost_writer</title>
+<link rel="stylesheet" href="/static/style.css?v=63">
+</head>
+<body>
+<div id="busy-bar" class="hidden"><div id="busy-bar-fill"></div><div id="busy-bar-right"><span id="busy-bar-label"></span><button id="btn-emergency-stop" title="Stop the AI call in progress">Stop</button></div></div>
+<div id="busy-overlay" class="hidden"></div>
+<div id="app">
+
+  <div id="status-msg"></div>
+
+  <div id="finalize-progress" class="hidden">
+    <div id="finalize-progress-track"><div id="finalize-progress-fill"></div></div>
+    <span id="finalize-progress-label"></span>
+  </div>
+
+  <div id="universal-bar" class="hidden">
+    <div id="universal-mode-toggle">
+      <button id="btn-universal-mode-do" class="universal-mode-btn active" title="Directly implement a change (review-gated as always)">Do</button>
+      <button id="btn-universal-mode-discuss" class="universal-mode-btn" title="Think it through together first - no change is generated until you say so">Discuss</button>
+    </div>
+    <div id="universal-discuss-log" class="hidden"></div>
+    <div id="universal-discuss-suggestion" class="hidden">
+      <span id="universal-discuss-suggestion-label">Suggested:</span>
+      <span id="universal-discuss-suggestion-text"></span>
+      <button id="btn-universal-discuss-use">Use this</button>
+    </div>
+    <div id="universal-input-row">
+      <textarea id="universal-prompt" placeholder="Type anything - one instruction or several run together, e.g. 'add a new character named... also make the tone darker... and in chapter 3, slow down the ending' - and it'll figure out where each part goes."></textarea>
+      <button id="btn-universal-go" class="primary">Go</button>
+      <button id="btn-universal-discuss-clear" class="hidden" title="Clear this conversation">Clear</button>
+    </div>
+  </div>
+  <div id="universal-queue-bar" class="hidden">
+    <span id="universal-queue-status"></span>
+    <button id="btn-universal-next">Next task &#9656;</button>
+    <button id="btn-universal-skip-rest">Skip remaining</button>
+  </div>
+  <div id="universal-touched-bar" class="hidden">
+    <span class="universal-touched-label">Changed - click to review:</span>
+    <span id="universal-touched-list"></span>
+    <button id="btn-universal-check-consistency">Check consistency</button>
+    <button id="btn-universal-touched-clear">Clear</button>
+  </div>
+
+  <div id="empty-state">Select or create a project to begin.</div>
+
+  <div id="main-row">
+    <aside id="icon-rail">
+      <span id="project-pill-wrap" class="dropdown-wrap">
+        <button id="btn-project-menu" class="rail-btn" title="Switch project">&#128193;</button>
+        <div id="project-menu" class="hidden dropdown-menu">
+          <div id="project-pill-name" class="project-menu-current"></div>
+          <div id="project-menu-list"></div>
+          <hr>
+          <button id="btn-new-project">+ New Project</button>
+        </div>
+      </span>
+      <button class="tab-btn rail-btn active" data-tab="manuscript" title="Manuscript">&#9998;</button>
+      <button class="tab-btn rail-btn" data-tab="plan" title="Plan">&#9776;</button>
+      <button id="btn-universal-toggle" class="rail-btn" title="Tell it what you want (press /)">&#10024;</button>
+      <div class="rail-spacer"></div>
+      <button class="tab-btn rail-btn" data-tab="settings" id="rail-settings-btn" title="Settings - prompts, local model, project">
+        &#9881;<span class="rail-llm-dot" id="rail-llm-dot"></span>
+      </button>
+    </aside>
+
+    <aside id="tree-sidebar" class="hidden"></aside>
+
+    <div id="manuscript-view" class="hidden"></div>
+
+    <aside id="entity-sidebar" class="hidden"></aside>
+
+  <div id="tab-panel-settings" class="hidden">
+    <div id="settings-header">
+      <h2>Settings</h2>
+      <button id="btn-settings-close" title="Close">&times;</button>
+    </div>
+    <section class="settings-section">
+      <h3>Local LLM</h3>
+      <div class="settings-row">
+        <span id="llm-indicator" class="llm-unknown" title="Local LLM server status">LLM: checking...</span>
+        <button id="btn-start-llm" class="hidden">Start LLM server</button>
+        <button id="btn-stop-llm" class="hidden">Stop LLM server</button>
+      </div>
+      <div class="settings-row">
+        <label>Model
+          <select id="llm-model"></select>
+        </label>
+        <button id="btn-switch-model" title="Requires the LLM server to be stopped first">Switch Model</button>
+      </div>
+      <div class="settings-row">
+        <label>llama.cpp folder
+          <input type="text" id="llm-cpp-folder" placeholder="e.g. D:\code\llama-b9827-bin-win-cuda-13.3-x64">
+        </label>
+      </div>
+      <div class="settings-row">
+        <label>Models folder
+          <input type="text" id="llm-models-folder" placeholder="e.g. D:\code\models">
+        </label>
+        <button id="btn-save-llm-folders" title="Requires the LLM server to be stopped first">Save Folders</button>
+      </div>
+      <p class="modal-hint">Leave a field blank to fall back to config.yaml / the repo's own
+        <code>models/</code> folder. Changes take effect on the next server start.</p>
+    </section>
+
+    <section class="settings-section">
+      <h3>AI Prompts</h3>
+      <p class="modal-hint">Each AI helper's system prompt. Edit to change how it behaves - saved
+        immediately and used from the next AI call on. Reset restores the built-in default.</p>
+      <label>Helper
+        <select id="pr-agent"></select>
+      </label>
+      <label>System prompt
+        <textarea id="pr-text" rows="12"></textarea>
+      </label>
+      <div class="modal-actions">
+        <button id="pr-save" class="primary">Save</button>
+        <button id="pr-reset">Reset to default</button>
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <h3>Bible Tools</h3>
+      <div class="settings-row">
+        <button id="btn-revise-outline">Revise Whole Outline</button>
+        <button id="btn-migrate-notes" title="Move legacy World entries that were misfiled here before the Notes panel existed (category 'import-note') into Notes">Clean up Notes</button>
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <h3>Translation</h3>
+      <p class="modal-hint">Final-pass translation of the finalized English manuscript. Each language
+        has its own native-culture translator persona (editable under AI Prompts). Run after chapters
+        are finalized - translating doesn't re-check continuity, it just carries the finished English
+        text into the target language.</p>
+      <label>Language
+        <select id="tr-language"></select>
+      </label>
+      <div class="settings-row">
+        <button id="btn-translate-book">Translate Entire Book</button>
+        <label><input type="checkbox" id="tr-retranslate"> Retranslate already-translated chapters</label>
+      </div>
+      <div class="settings-row">
+        <button id="btn-export-tr">Export Markdown</button>
+        <button id="btn-export-epub-tr">Export EPUB</button>
+        <button id="btn-export-pdf-tr" title="Not available for non-Latin scripts - use EPUB or Markdown instead">Export PDF</button>
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <h3>Project</h3>
+      <div class="settings-row">
+        <button id="btn-rename-project">Rename Project</button>
+        <button id="btn-move-project">Move Project Folder</button>
+        <button id="btn-import">Import Manuscript</button>
+        <button id="btn-export">Export Markdown</button>
+        <button id="btn-export-epub">Export EPUB</button>
+        <button id="btn-export-pdf">Export PDF</button>
+        <button id="btn-series">Add to Series</button>
+        <button id="btn-series-sync">Sync to Series</button>
+        <button id="btn-series-bible">View Series Bible</button>
+      </div>
+      <div class="settings-row">
+        <button id="btn-delete-project" class="danger">Delete Project</button>
+      </div>
+    </section>
+  </div>
+  </div>
+
+  <div id="canvas-drawer" class="hidden">
+    <div id="drawer-header">
+      <div id="editor-heading"><span id="editor-kind-pill" class="kind-pill"></span><h2 id="editor-title"></h2></div>
+      <button id="btn-drawer-close" title="Close">&times;</button>
+    </div>
+    <div id="drawer-body">
+      <div id="editor-actions-row">
+        <div id="editor-actions"></div>
+        <span id="editor-overflow-wrap" class="dropdown-wrap hidden">
+          <button id="btn-editor-overflow" class="pill-btn" title="More actions">&#8942;</button>
+          <div id="editor-overflow-menu" class="hidden dropdown-menu"></div>
+        </span>
+      </div>
+
+      <div id="issues-box" class="hidden"></div>
+      <div id="chapter-outline-box" class="hidden"></div>
+
+      <div id="outline-editor" class="hidden">
+        <label>Chapter # <input id="oe-chapter-num" type="number" min="1" disabled
+          title="Renumbering isn't supported here - it would orphan the chapter's drafted text. Delete and re-create if you truly need a different number."></label>
+        <label>Title <input id="oe-title"></label>
+        <label>Act <input id="oe-act" placeholder="e.g. Act 1" list="act-options"></label>
+        <label>Summary <textarea id="oe-summary" placeholder="Short logline (2-3 sentences)."></textarea></label>
+        <label>Characters in this chapter <input id="oe-characters" placeholder="Comma-separated names - used to pull in continuity from their nearest other chapter, earlier or later, when writing out of order"></label>
+        <label>Chapter outline <textarea id="oe-outline" rows="8" placeholder="Beat-by-beat outline of what happens in this chapter, from open to close."></textarea></label>
+
+        <div id="oe-scenes-section">
+          <div id="oe-scenes-head">
+            <span id="oe-scenes-label">Scenes <small>(optional - breaks this chapter into scene cards drafted individually, then stitched into one continuous chapter)</small></span>
+            <div id="oe-scenes-buttons">
+              <button id="oe-plan-scenes">Plan Scenes with AI</button>
+              <button id="oe-draft-from-scenes" class="hidden">Draft from Scenes</button>
+            </div>
+          </div>
+          <div id="oe-scenes-list"></div>
+        </div>
+      </div>
+
+      <div id="act-editor" class="hidden">
+        <label>Summary <textarea id="ae-summary" rows="8" placeholder="What happens across this act, before it's broken into individual chapter outlines."></textarea></label>
+        <div id="act-chapter-issues"></div>
+      </div>
+
+      <div id="overview-view" class="hidden text"></div>
+      <div id="engine-editor" class="hidden">
+        <div id="ov-title-row">
+          <label>Title <input id="ov-title" placeholder="Book title"></label>
+          <button id="ov-rename-title" title="Renames the project folder to match - separate from the Save button below since it moves files on disk">Rename</button>
+        </div>
+        <label>Premise <textarea id="ov-premise" placeholder="A one- or two-sentence pitch for the story."></textarea></label>
+        <label>Tone <input id="ov-tone" placeholder="e.g. wry, melancholic, breakneck, cozy"></label>
+        <label>Narrative voice <textarea id="ov-voice" placeholder="POV, tense, and narrator personality - e.g. close third person, past tense, sardonic and detached."></textarea></label>
+        <label>Narrative engine <textarea id="ov-engine" placeholder="What drives the story forward chapter to chapter - the central question, ticking clock, or escalating conflict engine."></textarea></label>
+        <label>Themes <textarea id="ov-themes" placeholder="The ideas/questions this book explores, one per line."></textarea></label>
+        <label class="checkbox-label"><input id="ov-real-world" type="checkbox"> Set in the real world - auto-research real places/facts and fact-check against them
+          (fiction can still deviate from reality where the story needs it; this only controls whether we bother checking)</label>
+        <div class="length-row">
+          <label>Total word target <input id="ov-total-words" type="number" min="1000" step="1000"
+            title="Informational + used to re-derive words/chapter when you change it. Existing chapters keep whatever they already have."></label>
+          <label>Words per chapter <input id="ov-chapter-words" type="number" min="100" step="100"
+            title="Applies to chapters drafted from now on - already-drafted chapters aren't retroactively changed."></label>
+        </div>
+        <div id="ov-revise-bar">
+          <textarea id="ov-instruction" placeholder="Type an instruction, e.g. 'make the tone darker' or 'tighten the narrative engine around a ticking clock'"></textarea>
+          <button id="ov-revise">Revise with AI</button>
+        </div>
+
+        <h4 class="ov-section-heading">Book details</h4>
+        <p class="modal-hint">Front/back matter for print, ebook, and PDF exports - not used by the AI when drafting.</p>
+        <label>Author name <input id="ov-author-name" placeholder="Name as it should appear on the title page and cover"></label>
+        <label>Back-cover blurb <textarea id="ov-blurb" placeholder="The pitch that goes on the back cover / retailer description - not exported into the manuscript itself."></textarea></label>
+        <label>Copyright page text <textarea id="ov-copyright" placeholder="e.g. Copyright (c) 2026 Jane Author. All rights reserved."></textarea></label>
+        <label>Foreword <textarea id="ov-foreword" placeholder="Optional foreword, printed before Chapter 1."></textarea></label>
+        <label>Acknowledgments <textarea id="ov-acknowledgments" placeholder="Optional acknowledgments section."></textarea></label>
+        <label>About the author <textarea id="ov-about-author" placeholder="Printed at the end of the book, after the last chapter."></textarea></label>
+      </div>
+
+      <div id="split-view">
+        <section id="pane-right">
+          <div id="pane-right-head">
+            <h4>Draft <span id="pane-right-label"></span></h4>
+            <div id="pane-view-toggle" class="hidden">
+              <button id="btn-view-diff" class="view-toggle-btn">View changes</button>
+              <button id="btn-view-edit" class="view-toggle-btn">Edit text</button>
+            </div>
+          </div>
+          <div class="text" id="pane-right-text"></div>
+          <textarea class="text hidden" id="pane-right-edit" placeholder="Edit the text directly here."></textarea>
+
+          <div id="draft-actions">
+            <div id="instruction-bar">
+              <textarea id="instruction" placeholder="Tell the AI what to change, e.g. 'make the ending more ambiguous' or 'the character loses his left arm here'"></textarea>
+              <button id="btn-revise" class="primary">&#10024; Revise with AI</button>
+            </div>
+            <div id="edit-actions">
+              <button id="btn-save-edit" class="primary">Save &amp; Finalize</button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="cs-field hidden" id="entity-rename-box">
+        <label>Name</label>
+        <input id="en-name">
+        <button id="en-name-save">Save</button>
+      </div>
+
+      <div id="world-category-box" class="hidden cs-field">
+        <label>Category</label>
+        <select id="wc-category">
+          <option value="faction">Faction</option>
+          <option value="location">Location</option>
+          <option value="object">Object/Item</option>
+          <option value="general">Misc</option>
+        </select>
+        <button id="wc-category-save">Move</button>
+      </div>
+
+      <div id="world-real-box" class="hidden cs-field">
+        <label class="checkbox-label"><input id="wr-is-real" type="checkbox"> <span id="wr-is-real-label">This is a real place - keep it factually accurate</span></label>
+      </div>
+
+      <div id="character-factions" class="hidden cs-field">
+        <h4>Factions</h4>
+        <div id="cf-checks"></div>
+        <button id="cf-save">Save</button>
+      </div>
+
+      <div id="world-objects" class="hidden cs-field">
+        <h4>Objects/Items Used Here</h4>
+        <div id="wo-checks"></div>
+        <button id="wo-save">Save</button>
+      </div>
+
+      <div id="derived-view" class="hidden cs-field">
+        <h4 id="derived-view-title">Related</h4>
+        <div id="derived-view-body"></div>
+      </div>
+
+      <div id="timeline-consequence" class="hidden cs-field">
+        <h4>Consequence</h4>
+        <p class="modal-hint">If this event changes a character's status (e.g. death), set it here so it follows them into the series bible.</p>
+        <label>Character</label>
+        <input id="tc-character" list="tc-character-options">
+        <datalist id="tc-character-options"></datalist>
+        <label>New status</label>
+        <input id="tc-status" placeholder="e.g. dead, missing, alive">
+        <button id="tc-save">Save</button>
+        <button id="tc-clear">Clear</button>
+      </div>
+
+      <div id="character-sections" class="hidden">
+        <div id="cs-header">
+          <h4>Character sections</h4>
+          <button id="cs-draft-missing" title="Splits this character's description into the empty structured sections below, using AI. Nothing saves until you click Save (or Save all).">Draft missing sections with AI</button>
+          <button id="cs-save-all" title="Saves every section with unsaved changes (highlighted below) in one step.">Save all</button>
+        </div>
+        <div id="cs-fields"></div>
+      </div>
+
+      <details id="timeline-wrap">
+        <summary>History</summary>
+        <div id="timeline"></div>
+      </details>
+    </div>
+  </div>
+</div>
+
+<div id="modal-backdrop" class="hidden modal-backdrop">
+  <div id="modal" class="modal">
+    <h3>New Project</h3>
+
+    <div id="np-step-prompt">
+      <p class="modal-hint">Paste or write anything you already have about the book - premise, characters,
+      world, tone, whatever's in your head - and the AI will draft title/genre/premise/tone/narrative
+      voice/engine/themes/characters/world for you to review and edit before anything is created.
+      Or skip straight to filling the fields in yourself.</p>
+      <label>Your concept <textarea id="np-freeform" placeholder="e.g. A satirical sci-fi novel about a washed-up starship captain forced to ferry a cargo of sentient houseplants across hostile space..."></textarea></label>
+      <div class="modal-actions">
+        <button id="np-cancel">Cancel</button>
+        <button id="np-skip-analyze">Skip - fill in manually</button>
+        <button id="np-analyze" class="primary">Analyze with AI</button>
+      </div>
+    </div>
+
+    <div id="np-step-review" class="hidden">
+      <p class="modal-hint">Review and edit before creating - nothing is saved until you click Create Project.</p>
+      <label>Title <input id="np-title" placeholder="auto-suggested from premise"></label>
+      <label>Book type
+        <select id="np-book-type">
+          <option value="fiction">Fiction</option>
+          <option value="nonfiction">Non-fiction</option>
+        </select>
+      </label>
+      <label>Genre <input id="np-genre" placeholder="general fiction"></label>
+      <label>Premise <textarea id="np-premise" placeholder="A one- or two-sentence pitch for the story."></textarea></label>
+      <label>Tone <input id="np-tone" placeholder="e.g. wry, melancholic, breakneck, cozy"></label>
+      <label>Narrative voice <textarea id="np-voice" placeholder="POV, tense, and narrator personality."></textarea></label>
+      <label>Narrative engine <textarea id="np-engine" placeholder="What drives the story forward chapter to chapter."></textarea></label>
+      <label>Themes (one per line) <textarea id="np-themes"></textarea></label>
+      <label>Length <select id="np-length"></select></label>
+      <label>Save to folder (optional) <input id="np-location" placeholder="default: projects/ - or an absolute folder path, e.g. D:\my-books"></label>
+      <p class="modal-hint">Length picks defaults below - override any of them to set your own total length,
+      chapter count, or pacing per chapter. Leave a field blank to keep the preset's value.</p>
+      <div class="length-row">
+        <label>Total words <input id="np-total-words" type="number" min="1000" step="1000" placeholder="from Length"></label>
+        <label>Chapters <input id="np-chapters" type="number" min="1" step="1" placeholder="from Length"></label>
+        <label>Words/chapter <input id="np-chapter-words" type="number" min="100" step="100" placeholder="from Length"></label>
+      </div>
+      <div id="np-fiction-fields">
+        <label>Characters (one per line: Name | Role | Description) <textarea id="np-characters"></textarea></label>
+        <label>World (one per line: Name | Category | Description) <textarea id="np-world"></textarea></label>
+      </div>
+      <div class="modal-actions">
+        <button id="np-back">Back</button>
+        <button id="np-cancel2">Cancel</button>
+        <button id="np-create" class="primary">Create Project</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="import-modal-backdrop" class="hidden modal-backdrop">
+  <div id="import-modal" class="modal">
+    <h3>Import Manuscript</h3>
+    <p class="modal-hint">Pick .docx/.md/.txt files (or a whole folder). Files can mix
+    finished prose, outline notes, character/world notes, and freeform thoughts - each is
+    sorted automatically into chapters/outline/characters/world if the LLM server is
+    running, or filed as an unsorted note for you to sort if it isn't.
+    Using the same title as an existing project adds to it instead of creating a new one.
+    Only premise is required - title/genre are auto-suggested if left blank and can be edited later.</p>
+    <label>Title <input id="im-title" placeholder="auto-suggested from premise"></label>
+    <label>Genre <input id="im-genre" placeholder="general fiction"></label>
+    <label>Premise <textarea id="im-premise" placeholder="A one- or two-sentence pitch for the story."></textarea></label>
+    <label>Length <select id="im-length"></select></label>
+    <div class="length-row">
+      <label>Total words <input id="im-total-words" type="number" min="1000" step="1000" placeholder="from Length"></label>
+      <label>Words/chapter <input id="im-chapter-words" type="number" min="100" step="100" placeholder="from Length"></label>
+    </div>
+    <label>Files
+      <input id="im-files" type="file" multiple webkitdirectory>
+    </label>
+    <label class="modal-hint-inline">
+      <input id="im-files-mode" type="checkbox"> Pick individual files instead of a folder
+    </label>
+    <div class="modal-actions">
+      <button id="im-cancel">Cancel</button>
+      <button id="im-import">Import</button>
+    </div>
+  </div>
+</div>
+
+<datalist id="act-options"></datalist>
+
+<div id="idea-modal-backdrop" class="hidden modal-backdrop">
+  <div id="idea-modal" class="modal">
+    <h3 id="idea-modal-title">New Idea</h3>
+    <p class="modal-hint">A chapter idea you haven't placed yet - no act or chapter # needed. Once you know where it fits, promote it into the outline.</p>
+    <label>Title <input id="idea-title"></label>
+    <label>Notes <textarea id="idea-notes" rows="6" placeholder="Whatever you've got - a beat, a line of dialogue, why it matters."></textarea></label>
+    <label>Relates to
+      <input id="idea-relates-search" placeholder="Search acts, chapters, characters, world...">
+      <select id="idea-relates-to"><option value="">None</option></select>
+    </label>
+    <div class="modal-actions">
+      <button id="idea-cancel">Cancel</button>
+      <button id="idea-save" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="outline-modal-backdrop" class="hidden modal-backdrop">
+  <div id="outline-modal" class="modal">
+    <h3 id="outline-modal-title">New Outline Entry</h3>
+    <p id="outline-modal-hint" class="modal-hint">Adds a chapter to the outline. Typing an Act that doesn't exist yet creates it - acts are just a label, not a separate list.
+    Set the chapter # first, then either describe the chapter and let AI draft the title/act/summary, or fill them in yourself.</p>
+    <label>Chapter # <input id="oo-chapter-num" type="number" min="1"></label>
+    <label>Describe this chapter <textarea id="oo-freeform" placeholder="e.g. She finally confronts her sister about the letters, but the truth isn't what either of them expected."></textarea></label>
+    <div class="modal-actions">
+      <button id="oo-suggest">Suggest with AI</button>
+    </div>
+    <label>Title <input id="oo-title"></label>
+    <label>Act <input id="oo-act" placeholder="e.g. Act 1" list="act-options"></label>
+    <label>Summary <textarea id="oo-summary"></textarea></label>
+    <label>Chapter outline <textarea id="oo-outline" rows="8" placeholder="Beat-by-beat outline of what happens in this chapter, from open to close."></textarea></label>
+    <div class="modal-actions">
+      <button id="oo-cancel">Cancel</button>
+      <button id="oo-create">Create</button>
+    </div>
+  </div>
+</div>
+
+<div id="revise-outline-modal-backdrop" class="hidden modal-backdrop">
+  <div id="revise-outline-modal" class="modal wide-modal">
+    <h3>Revise Whole Outline</h3>
+
+    <div id="ro-step-instruction">
+      <p class="modal-hint">Describe how the whole plot outline should change - add/remove/reorder chapters,
+      shift a subplot, compress an act, whatever. Chapters that already have drafted or approved prose are
+      protected: the AI is told to keep their chapter number and not contradict what's already written.</p>
+      <label>Instruction <textarea id="ro-instruction" placeholder="e.g. Add a subplot where the quartermaster is secretly working for the antagonist, paying off across Act 2."></textarea></label>
+      <div class="modal-actions">
+        <button id="ro-cancel">Cancel</button>
+        <button id="ro-draft" class="primary">Draft Revision with AI</button>
+      </div>
+    </div>
+
+    <div id="ro-step-review" class="hidden">
+      <p class="modal-hint">Review and edit before applying - nothing is saved until you click Apply.
+      One chapter per line: <code>chapter # | act | title | summary | setup | event | resolution</code>.
+      Trailing fields (setup/event/resolution) may be left blank. Add or delete lines to
+      add/remove chapters; blank lines are ignored.</p>
+      <textarea id="ro-outline-text" rows="18"></textarea>
+      <div class="modal-actions">
+        <button id="ro-back">Back</button>
+        <button id="ro-cancel2">Cancel</button>
+        <button id="ro-apply" class="primary">Apply Changes</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="palette-backdrop" class="hidden modal-backdrop">
+  <div id="palette" class="modal wide-modal palette">
+    <input id="palette-input" placeholder="Jump to a chapter, character, faction, world entry, note... or run a command">
+    <div id="palette-results"></div>
+  </div>
+</div>
+
+<div id="unsaved-modal-backdrop" class="hidden modal-backdrop">
+  <div id="unsaved-modal" class="modal">
+    <h3>Unsaved character changes</h3>
+    <p class="modal-hint" id="unsaved-modal-text">This character has unsaved section changes (highlighted). Save them before leaving?</p>
+    <div class="modal-actions">
+      <button id="unsaved-cancel">Stay here</button>
+      <button id="unsaved-discard">Discard changes</button>
+      <button id="unsaved-save" class="primary">Save and continue</button>
+    </div>
+  </div>
+</div>
+
+<div id="series-modal-backdrop" class="hidden modal-backdrop">
+  <div id="series-modal" class="modal">
+    <h3>Add Project to Series</h3>
+    <p class="modal-hint">Renames this project's folder to be namespaced under the series and creates/updates a
+    shared series bible seeded with this project's current characters, world entries, and notes. Future books in
+    the same series will inherit that canon and a recap of this book. This cannot be undone from the UI - back up
+    the project folder first if unsure.</p>
+    <label>Series name <input id="sm-series-title" placeholder="e.g. The Drango Chronicles"></label>
+    <label>Book number in series <input id="sm-book-num" type="number" min="1" value="1"></label>
+    <div class="modal-actions">
+      <button id="sm-cancel">Cancel</button>
+      <button id="sm-confirm">Add to Series</button>
+    </div>
+  </div>
+</div>
+
+<div id="series-bible-modal-backdrop" class="hidden modal-backdrop">
+  <div id="series-bible-modal" class="modal wide-modal">
+    <h3 id="sb-title">Series Bible</h3>
+    <button id="btn-move-series">Move Series Folder</button>
+    <div id="sb-body">
+      <section>
+        <h4>Characters</h4>
+        <div id="sb-characters"></div>
+      </section>
+      <section>
+        <h4>World</h4>
+        <div id="sb-world"></div>
+      </section>
+      <section>
+        <h4>Books</h4>
+        <div id="sb-books"></div>
+      </section>
+      <section>
+        <h4>Persistent Events</h4>
+        <p class="modal-hint">Status-changing events (like a death) recorded across the series. Revert to undo a
+        status change (e.g. resurrect a character); edit to retcon the details.</p>
+        <div id="sb-events"></div>
+      </section>
+    </div>
+    <div class="modal-actions">
+      <button id="sb-close">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="entity-modal-backdrop" class="hidden modal-backdrop">
+  <div id="entity-modal" class="modal">
+    <h3 id="entity-modal-title">New Character</h3>
+    <label id="ne-freeform-label">Describe it <textarea id="ne-freeform" placeholder="e.g. Her estranged sister, sharp-tongued and still furious about the inheritance."></textarea></label>
+    <div id="ne-suggest-row" class="modal-actions">
+      <button id="ne-suggest">Suggest with AI</button>
+    </div>
+    <label>Name <input id="ne-name"></label>
+    <label id="ne-role-label">Role <input id="ne-role" placeholder="protagonist / supporting / antagonist"></label>
+    <label id="ne-category-label" class="hidden">Category <input id="ne-category" placeholder="location / faction / object..."></label>
+    <label id="ne-real-label" class="hidden checkbox-label"><input id="ne-real" type="checkbox"> This is a real place - keep it factually accurate</label>
+    <label id="ne-story-date-label" class="hidden">Story date <input id="ne-story-date" placeholder="e.g. Day 3 / March 2047"></label>
+    <label id="ne-chapter-num-label" class="hidden">Chapter # (optional) <input id="ne-chapter-num" type="number"></label>
+    <label id="ne-characters-label" class="hidden">Characters involved (comma-separated, optional) <input id="ne-characters" placeholder="e.g. Alice, Bob"></label>
+    <label id="ne-locations-label" class="hidden">Locations/factions/objects involved (comma-separated, optional) <input id="ne-locations" placeholder="e.g. The Rusty Anchor, The Guild"></label>
+    <label id="ne-text-label">Description <textarea id="ne-text"></textarea></label>
+    <div id="ne-consequence-row" class="hidden">
+      <p class="modal-hint">Optional: if this event permanently changes a character's status (e.g. death), it
+      will follow that character into later books of a series once this book is synced/finalized to the series
+      bible - reversible any time from the Series Bible page.</p>
+      <label>Character <input id="ne-consequence-character" list="ne-consequence-character-options" placeholder="leave blank for no lasting consequence"></label>
+      <label>New status <input id="ne-consequence-status" placeholder="e.g. dead, missing, exiled"></label>
+    </div>
+    <datalist id="ne-consequence-character-options"></datalist>
+    <div class="modal-actions">
+      <button id="ne-cancel">Cancel</button>
+      <button id="ne-create">Create</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/static/js/main.js?v=92"></script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+# --- User content: stories, projects, series data (never upload) ---
+projects/
+series/
+
+# --- Local models (large binaries, live outside repo per config.yaml) ---
+models/*
+!models/README.md
+*.gguf
+
+# --- Logs (runtime output, some may echo manuscript/prompt content) ---
+*.log
+server_log.txt
+
+# --- Generated/scratch artifacts ---
+gw_openapi.json
+openapi_check.json
+scratch_test.pdf
+webui_verify.log
+
+# --- Local machine config (absolute local paths; keep an example instead) ---
+config.yaml
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- Claude Code local state ---
+.claude/scheduled_tasks.lock
+
+# --- OS/editor cruft ---
+.DS_Store
+Thumbs.db
