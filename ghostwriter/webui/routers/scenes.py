@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -20,8 +19,9 @@ from pydantic import BaseModel
 from ghostwriter.agents.author import stitch_scenes
 from ghostwriter.agents.base import AIOutputError
 from ghostwriter.llm_client import LLMCancelled
-from ghostwriter.webui.deps import get_author, load_bible, maybe_compact_history
+from ghostwriter.webui.deps import get_author, load_bible, maybe_compact_history, with_bible_lock
 from ghostwriter.webui.diffing import word_diff
+from ghostwriter.webui.jobs import JobStore
 from ghostwriter.webui.routers.chapters import InstructionRequest, _guard_rewrite
 from ghostwriter.webui.state import outliner, reviser
 
@@ -59,6 +59,7 @@ class ApplyScenesRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/outline/{chapter_num}/scenes/apply")
+@with_bible_lock
 def apply_scenes(slug: str, chapter_num: int, req: ApplyScenesRequest) -> list[dict[str, Any]]:
     """Persists a planned/edited scene list, replacing any existing scenes
     for this chapter. Refuses to drop a scene that already has a draft, so
@@ -99,6 +100,7 @@ class SceneEditRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/outline/{chapter_num}/scenes/{scene_num}/edit")
+@with_bible_lock
 def edit_scene(slug: str, chapter_num: int, scene_num: int, req: SceneEditRequest) -> dict[str, Any]:
     bible = load_bible(slug)
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
@@ -108,12 +110,13 @@ def edit_scene(slug: str, chapter_num: int, scene_num: int, req: SceneEditReques
         raise HTTPException(404, str(exc))
 
 
-_scene_draft_jobs: dict[str, dict[str, Any]] = {}
-_scene_revise_jobs: dict[str, dict[str, Any]] = {}
+_scene_draft_jobs = JobStore()
+_scene_revise_jobs = JobStore()
 
 
+@with_bible_lock
 def _run_scene_draft_job(job_id: str, slug: str, chapter_num: int, scene_num: int) -> None:
-    job = _scene_draft_jobs[job_id]
+    job = _scene_draft_jobs.get(job_id)
     try:
         bible = load_bible(slug)
         if bible.get_scene(chapter_num, scene_num) is None:
@@ -141,8 +144,7 @@ def draft_scene(slug: str, chapter_num: int, scene_num: int) -> dict[str, Any]:
     if bible.get_scene(chapter_num, scene_num) is None:
         raise HTTPException(404, f"No scene {scene_num} for chapter {chapter_num}")
 
-    job_id = uuid.uuid4().hex
-    _scene_draft_jobs[job_id] = {"done": False, "error": None, "result": None, "partial_text": ""}
+    job_id = _scene_draft_jobs.create({"partial_text": ""})
     threading.Thread(
         target=_run_scene_draft_job, args=(job_id, slug, chapter_num, scene_num), daemon=True
     ).start()
@@ -157,8 +159,9 @@ def draft_scene_status(slug: str, chapter_num: int, scene_num: int, job_id: str)
     return job
 
 
+@with_bible_lock
 def _run_scene_revise_job(job_id: str, slug: str, chapter_num: int, scene_num: int, instruction: str) -> None:
-    job = _scene_revise_jobs[job_id]
+    job = _scene_revise_jobs.get(job_id)
     try:
         bible = load_bible(slug)
         scene = bible.get_scene(chapter_num, scene_num)
@@ -192,8 +195,7 @@ def revise_scene(slug: str, chapter_num: int, scene_num: int, req: InstructionRe
     if not scene.get("draft"):
         raise HTTPException(400, "Scene has no draft yet")
 
-    job_id = uuid.uuid4().hex
-    _scene_revise_jobs[job_id] = {"done": False, "error": None, "result": None, "partial_text": ""}
+    job_id = _scene_revise_jobs.create({"partial_text": ""})
     threading.Thread(
         target=_run_scene_revise_job, args=(job_id, slug, chapter_num, scene_num, req.instruction), daemon=True
     ).start()
@@ -209,6 +211,7 @@ def revise_scene_status(slug: str, chapter_num: int, scene_num: int, job_id: str
 
 
 @router.post("/api/projects/{slug}/outline/{chapter_num}/scenes/{scene_num}/approve")
+@with_bible_lock
 def approve_scene(slug: str, chapter_num: int, scene_num: int) -> dict[str, Any]:
     bible = load_bible(slug)
     try:
@@ -218,6 +221,7 @@ def approve_scene(slug: str, chapter_num: int, scene_num: int) -> dict[str, Any]
 
 
 @router.delete("/api/projects/{slug}/outline/{chapter_num}/scenes/{scene_num}")
+@with_bible_lock
 def delete_scene(slug: str, chapter_num: int, scene_num: int) -> dict[str, Any]:
     bible = load_bible(slug)
     try:
@@ -228,6 +232,7 @@ def delete_scene(slug: str, chapter_num: int, scene_num: int) -> dict[str, Any]:
 
 
 @router.post("/api/projects/{slug}/outline/{chapter_num}/scenes/stitch")
+@with_bible_lock
 def stitch_chapter_from_scenes(slug: str, chapter_num: int) -> dict[str, Any]:
     """Concatenates the chapter's drafted scenes into one chapter draft and
     saves it as a new chapter revision - the "Draft from Scenes" action.

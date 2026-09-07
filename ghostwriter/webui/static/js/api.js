@@ -149,10 +149,21 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+// Auto-fades every status message (including the ones left showing after a
+// long job like the whole-book continuity sweep finishes) instead of leaving
+// it pinned in the corner forever until the next unrelated setStatus() call
+// happens to overwrite it. Errors get a longer hold since they're more
+// important to actually read.
+let statusFadeTimer = null;
 export function setStatus(msg, isError = false) {
   const el = $("status-msg");
+  el.classList.remove("fading");
   el.textContent = msg;
   el.style.color = isError ? "#c0392b" : "";
+  if (statusFadeTimer) clearTimeout(statusFadeTimer);
+  if (msg) {
+    statusFadeTimer = setTimeout(() => el.classList.add("fading"), isError ? 12000 : 6000);
+  }
 }
 
 let busyCount = 0;
@@ -245,6 +256,25 @@ export async function pollDeterminateJob(statusUrl) {
         if (job.error) throw new Error(job.error);
         return job;
       }
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+  } finally {
+    hideFinalizeProgress();
+  }
+}
+
+// Same as pollDeterminateJob, but for jobs like bible-sync that can finish
+// with a partial "error" (some proposal steps failed) alongside real
+// proposals from the steps that succeeded - throwing here would lose those
+// proposals, so the caller gets the raw job back and decides what to do
+// with job.error itself (same contract pollFinalizeJob already uses).
+export async function pollDeterminateJobKeepErrors(statusUrl) {
+  showFinalizeProgress();
+  try {
+    for (;;) {
+      const job = await api(statusUrl, {}, { silent: true });
+      updateFinalizeProgress(job);
+      if (job.done) return job;
       await new Promise((resolve) => setTimeout(resolve, 800));
     }
   } finally {

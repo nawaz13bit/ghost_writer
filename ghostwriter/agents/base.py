@@ -77,6 +77,75 @@ class Agent:
             raise AIOutputError(f"Expected a JSON object, got: {result!r}"[:300])
         return result
 
+    def ask_json_batched(
+        self, entries: list[str], build_prompt: Callable[[str], str], max_chars: int = 40_000, **kwargs
+    ) -> list[dict]:
+        """For prompts built from a pool of independent reference entries
+        (e.g. the whole character/world bible) that can grow past the
+        model's context window as a book gets longer: splits entries into
+        batches that each fit under max_chars, runs ask_json separately per
+        batch via build_prompt(batch_text), and concatenates the results.
+        Each batch is judged only against itself, not against the other
+        batches or a running memory of them - there's no "story so far" here,
+        just a reference list too big for one call - so a fact already
+        recorded in a bible entry outside the current batch may get
+        re-proposed; that's caught by the writer's existing review gate
+        rather than solved here. A single project small enough to fit in one
+        batch behaves exactly as before (one call, same as ask_json)."""
+        merged: list[dict] = []
+        for batch in chunk_by_chars(entries, max_chars):
+            result = self.ask_json(build_prompt("\n".join(batch)), **kwargs)
+            if isinstance(result, dict):
+                result = [result]
+            if isinstance(result, list):
+                merged.extend(item for item in result if isinstance(item, dict))
+        return merged
+
+    def ask_refine(
+        self,
+        items: list[str],
+        build_prompt: Callable[[str, str], str],
+        initial_summary: str = "",
+        max_chars: int = 40_000,
+        **kwargs,
+    ) -> str:
+        """Rolling-summary refine chain for content with a natural sequence
+        (e.g. consecutive chapters of a manuscript) too long to reason about
+        in one call: items are grouped into batches that each fit under
+        max_chars, and each batch is folded into a running summary via
+        build_prompt(batch_text, prior_summary) - so batch N+1 sees only the
+        summary of batches 1..N, not their raw text. Returns the final
+        summary after every batch has been folded in. A single batch behaves
+        exactly like one plain ask() call seeded with initial_summary."""
+        summary = initial_summary
+        for batch in chunk_by_chars(items, max_chars):
+            summary = self.ask(build_prompt("\n".join(batch), summary), **kwargs)
+        return summary
+
+
+def chunk_by_chars(items: list[str], max_chars: int) -> list[list[str]]:
+    """Groups a list of text items into batches that each stay under
+    max_chars combined, without splitting any single item across batches -
+    used by ask_json_batched/ask_refine to keep a single LLM call's prompt
+    under the model's context window. An item longer than max_chars on its
+    own still gets a batch to itself (better an oversized single call than
+    silently dropping/truncating content). Returns [] for an empty input, or
+    a single batch holding everything if it already fits."""
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
+    for item in items:
+        item_len = len(item)
+        if current and current_len + item_len > max_chars:
+            batches.append(current)
+            current = []
+            current_len = 0
+        current.append(item)
+        current_len += item_len
+    if current:
+        batches.append(current)
+    return batches
+
 
 _DELIMITER_LINE = re.compile(r"^---[^\n]*---\s*$")
 

@@ -141,6 +141,12 @@ def _build_index(bible: StoryBible, include_outline: bool = False, before_chapte
                     f"Chapter {num} scene {s['scene_num']} [{s.get('transition', 'continuous')}]: {s.get('beats', '')}",
                     "scene",
                 ))
+        # Only open ideas are worth flagging a chapter against - a resolved
+        # or dropped one is no longer a live continuity concern.
+        for i in bible.data.get("ideas", []):
+            if i.get("status", "open") != "open":
+                continue
+            docs.append(Document(f"idea:{i['id']}", f"{i.get('title', '')} {i.get('notes', '')}", "idea"))
     else:
         for num, title, text in bible.all_chapter_text():
             if before_chapter is not None and num >= before_chapter:

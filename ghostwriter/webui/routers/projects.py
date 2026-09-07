@@ -25,8 +25,8 @@ from ghostwriter.memory.story_bible import StoryBible, slugify
 from ghostwriter.export.pdf_export import build_pdf
 from ghostwriter.tools.epub_export import build_epub
 from ghostwriter.tools.manuscript_import import CHAPTER_EXTENSIONS, import_manuscript
-from ghostwriter.webui.deps import current_chapter_text, load_bible, resolve_length
-from ghostwriter.webui.state import cfg, discuss_agent, outliner, project_analyzer, researcher, router_agent, translators, world_builder, character_builder
+from ghostwriter.webui.deps import current_chapter_text, load_bible, resolve_length, with_bible_lock
+from ghostwriter.webui.state import blurb_agent, cfg, discuss_agent, outliner, project_analyzer, researcher, router_agent, translators, world_builder, character_builder
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +258,7 @@ class RenameProjectRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/rename")
+@with_bible_lock
 def rename_project(slug: str, req: RenameProjectRequest) -> dict[str, Any]:
     """Renames the book title and, to keep the folder/slug in sync (it's the
     stable ID used in URLs and file paths), moves the project directory to
@@ -291,6 +292,7 @@ class SeriesAttachRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/series")
+@with_bible_lock
 def attach_project_to_series(slug: str, req: SeriesAttachRequest) -> dict[str, Any]:
     bible = load_bible(slug)
     if bible.data.get("series_title"):
@@ -315,6 +317,7 @@ def attach_project_to_series(slug: str, req: SeriesAttachRequest) -> dict[str, A
 
 
 @router.post("/api/projects/{slug}/series/sync")
+@with_bible_lock
 def sync_project_to_series(slug: str) -> dict[str, Any]:
     """Re-pushes this book's current characters/world/notes/timeline (including
     any status-changing events, e.g. a character death) up into the series
@@ -339,6 +342,7 @@ class OverviewEditRequest(BaseModel):
     total_word_target: int | None = None
     author_name: str = ""
     blurb: str = ""
+    query_letter: str = ""
     copyright_text: str = ""
     foreword: str = ""
     acknowledgments: str = ""
@@ -346,6 +350,7 @@ class OverviewEditRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/overview")
+@with_bible_lock
 def edit_overview(slug: str, req: OverviewEditRequest) -> dict[str, Any]:
     bible = load_bible(slug)
     bible.data["premise"] = req.premise.strip()
@@ -360,12 +365,28 @@ def edit_overview(slug: str, req: OverviewEditRequest) -> dict[str, Any]:
         bible.data["total_word_target"] = req.total_word_target
     bible.data["author_name"] = req.author_name.strip()
     bible.data["blurb"] = req.blurb.strip()
+    bible.data["query_letter"] = req.query_letter.strip()
     bible.data["copyright_text"] = req.copyright_text.strip()
     bible.data["foreword"] = req.foreword.strip()
     bible.data["acknowledgments"] = req.acknowledgments.strip()
     bible.data["about_author"] = req.about_author.strip()
     bible.save()
     return bible.data
+
+
+@router.post("/api/projects/{slug}/generate-blurb")
+def generate_blurb(slug: str) -> dict[str, str]:
+    """Generates a back-cover blurb and a literary-agent query letter from
+    the bible's premise/characters/outline. Review-gated like every other AI
+    write in this app: returns the draft for the writer to look over in the
+    Book details fields, doesn't save it until they hit Save themselves."""
+    bible = load_bible(slug)
+    try:
+        return blurb_agent.generate(bible)
+    except AIOutputError as exc:
+        raise HTTPException(502, f"The AI returned an unexpected response ({exc}) - try again.")
+    except LLMCancelled:
+        raise HTTPException(409, "Stopped by user.")
 
 
 class ReviseOverviewRequest(BaseModel):

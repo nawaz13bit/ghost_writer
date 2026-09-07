@@ -3,12 +3,12 @@
 // referenced by index.html.
 import { $, clearTouched, emergencyStopLLM, setStatus, wireClick } from "./api.js";
 import {
-  advanceUniversalQueue, applyOutlineRevision, checkConsistency, closeDrawer,
-  closeEntityModal, closeIdeaModal, closeOutlineModal, closeReviseOutlineModal, createEntity,
-  createOutlineEntry, draftFromScenes, draftMissingCharacterSections, draftOutlineRevision,
+  advanceUniversalQueue, applyOutlineRevision, cancelBulkFix, checkConsistency, closeDrawer,
+  closeEntityModal, closeIdeaModal, closeIntegrateIdeaModal, closeOutlineModal, closeReviseOutlineModal, createEntity,
+  createOutlineEntry, draftFromScenes, draftMissingCharacterSections, draftOutlineRevision, integrateIdeaIntoChapter,
   migrateImportNotes, planScenesWithAI,
-  loadLlmModels, loadLlmFolders, saveLlmFolders, openReviseOutlineModal, pollLlmStatus, renameEntity, reviseEngine,
-  reviseWithInstruction, runUniversalPrompt, saveAllCharacterSections, saveCharacterFactions, filterIdeaRelatesTo, saveIdea, saveManualEdit, savePrompt,
+  loadLlmModels, loadLlmFolders, saveLlmFolders, openReviseOutlineModal, pollLlmStatus, renameEntity, reviseEngine, generateBlurb,
+  reviseWithInstruction, runUniversalPrompt, saveAllCharacterSections, saveCharacterFactions, addCharacterReveal, suggestCharacterReveal, filterIdeaRelatesTo, saveIdea, saveManualEdit, savePrompt,
   clearTimelineConsequence, saveTimelineConsequence, saveWorldCategory, saveWorldIsReal, saveWorldObjects,
   setPaneView, showPromptFor, showReviseOutlineStep, skipRemainingUniversalTasks,
   startLlm, stopLlm, switchModel, suggestEntity, suggestOutlineEntry,
@@ -25,6 +25,7 @@ import {
 } from "./projects.js";
 import { openPalette } from "./palette.js";
 import { setActiveTab } from "./tabs.js";
+import "./modal-resize.js";
 
 function wireDropdownMenu(btnId, menuId) {
   const btn = $(btnId), menu = $(menuId);
@@ -64,7 +65,7 @@ $("btn-settings-close").addEventListener("click", () => setActiveTab("manuscript
 
 $("btn-start-llm").addEventListener("click", () => startLlm());
 $("btn-stop-llm").addEventListener("click", () => stopLlm());
-$("btn-emergency-stop").addEventListener("click", emergencyStopLLM);
+$("btn-emergency-stop").addEventListener("click", () => { emergencyStopLLM(); cancelBulkFix(); });
 wireClick("btn-switch-model", switchModel);
 wireClick("btn-save-llm-folders", saveLlmFolders);
 pollLlmStatus();
@@ -166,6 +167,9 @@ wireClick("ne-suggest", suggestEntity);
 $("idea-cancel").addEventListener("click", closeIdeaModal);
 wireClick("idea-save", saveIdea);
 
+$("ii-cancel").addEventListener("click", closeIntegrateIdeaModal);
+wireClick("ii-integrate", integrateIdeaIntoChapter);
+
 $("oo-cancel").addEventListener("click", closeOutlineModal);
 wireClick("oo-create", createOutlineEntry);
 wireClick("oo-suggest", suggestOutlineEntry);
@@ -178,6 +182,7 @@ wireClick("ro-apply", applyOutlineRevision);
 wireClick("oe-plan-scenes", planScenesWithAI);
 wireClick("oe-draft-from-scenes", draftFromScenes);
 wireClick("ov-revise", reviseEngine);
+wireClick("ov-generate-blurb", generateBlurb);
 wireClick("ov-rename-title", renameProject);
 wireClick("btn-rename-project", renameProjectPrompt);
 wireClick("btn-move-project", moveProjectPrompt);
@@ -204,6 +209,8 @@ wireClick("btn-universal-check-consistency", checkConsistency);
 wireClick("cs-draft-missing", draftMissingCharacterSections);
 wireClick("cs-save-all", saveAllCharacterSections);
 wireClick("cf-save", saveCharacterFactions);
+wireClick("cr-add", addCharacterReveal);
+wireClick("cr-suggest", suggestCharacterReveal);
 wireClick("wo-save", saveWorldObjects);
 $("idea-relates-search").addEventListener("input", filterIdeaRelatesTo);
 $("wr-is-real").addEventListener("change", saveWorldIsReal);

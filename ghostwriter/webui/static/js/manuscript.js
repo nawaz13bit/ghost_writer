@@ -8,7 +8,7 @@
 // page in this same view, built by editor.js's ensureEntityHost() - there is
 // no floating drawer panel anywhere in the UI.
 import { $, state, withInlineFeedback } from "./api.js";
-import { chapterStatusBadge, embedDrawerInto, fixContinuityIssues, getChapter, linkedIdeasFor, resetDrawerEmbed, selectItem, setSelection } from "./editor.js";
+import { chapterStatusBadge, embedDrawerInto, fixContinuityIssues, getChapter, linkedIdeasFor, recheckMessage, resetDrawerEmbed, selectItem, setSelection } from "./editor.js";
 
 let currentChapterNum = null;
 let editorOpen = false;
@@ -67,7 +67,7 @@ function renderChapterMeta(container, ch, entry) {
   const chapterIssues = [...(ch.continuity_issues || [])];
   const consistencyFlags = (state.bible.continuity_flags || []).filter(f => f.chapter_num === ch.chapter_num);
   for (const f of consistencyFlags) chapterIssues.push(f.issue || f.instruction || "Flagged by consistency check.");
-  if (ch.needs_recheck) chapterIssues.unshift("Flagged for recheck - an earlier chapter changed since this was approved.");
+  if (ch.needs_recheck) chapterIssues.unshift(recheckMessage(ch));
   if (chapterIssues.length) {
     const box = document.createElement("div");
     box.className = "util-issues-box";

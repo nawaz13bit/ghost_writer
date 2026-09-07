@@ -68,6 +68,67 @@ writer wrote. Respond with ONLY a single JSON object like:
             result = result[0]
         return result
 
+    def suggest_reveal(
+        self,
+        bible: StoryBible,
+        character: dict,
+        unlock_chapter_num: int,
+        section: str | None = None,
+        freeform: str = "",
+    ) -> dict:
+        """Drafts a plot-gated reveal for this character - a fact appropriate
+        to surface once the given outline chapter is reached - for the writer
+        to review/edit before saving. Uses that chapter's outline plus the
+        character's established sections and already-planned reveals so it
+        doesn't repeat or contradict anything."""
+        entry = bible.outline_entry(unlock_chapter_num)
+        chapter_context = ""
+        if entry:
+            chapter_context = (
+                f"\nChapter {unlock_chapter_num} (\"{entry.get('title', '')}\") storyline: "
+                f"{entry.get('summary', '')}\n{entry.get('outline', '')}"
+            )
+
+        existing = character.get("sections") or {}
+        filled_lines = "\n".join(
+            f"{self.SECTION_LABELS.get(k, k)}: {v}" for k, v in existing.items() if (v or "").strip()
+        )
+
+        reveals = sorted(character.get("reveals") or [], key=lambda r: r.get("unlock_chapter_num", 0))
+        already_revealed = "\n".join(
+            f"- (unlocks ch. {r.get('unlock_chapter_num')}) {r.get('text', '')}" for r in reveals
+        )
+
+        section_hint = f'\nThe writer wants this filed under the "{section}" section.' if section else ""
+        freeform_hint = f'\nThe writer\'s guidance for this reveal: "{freeform}"' if freeform.strip() else ""
+
+        prompt = f"""Character: {character.get('name', '')} ({character.get('role', '')})
+Description: {character.get('description', '')}
+
+Established structured sections (do not contradict):
+{filled_lines or "(none yet)"}
+
+Reveals already planned for this character (do not repeat or contradict these):
+{already_revealed or "(none yet)"}
+{chapter_context}
+{section_hint}{freeform_hint}
+
+Draft ONE new plot-gated reveal: a fact about this character that should only
+become known to the reader once Chapter {unlock_chapter_num} is reached -
+something that fits naturally with what's happening in that chapter's
+storyline above, without contradicting the character's established sections
+or other reveals above.
+Respond with ONLY a single JSON object like:
+{{"text": "...", "section": "..."}}
+where "section" is one of {list(self.SECTION_LABELS)} (whichever section this
+fact would eventually update) or "" if it's a general plot fact not tied to
+one of those sections."""
+        result = self.ask_json_object(prompt)
+        return {
+            "text": (result.get("text") or "").strip(),
+            "section": (result.get("section") or "").strip(),
+        }
+
     SECTION_LABELS = {
         "appearance": "Appearance",
         "personality": "Personality",
@@ -111,41 +172,70 @@ like {{"{missing[0]}": "..."}}"""
         result = self.ask_json_object(prompt)
         return {k: result[k] for k in missing if isinstance(result.get(k), str) and result[k].strip()}
 
-    def resync_sections(self, bible: StoryBible, character: dict, new_facts: str) -> dict:
+    def resync_sections(
+        self, bible: StoryBible, character: dict, new_facts: str, chapter_num: int | None = None
+    ) -> dict:
         """Given a newly-established fact about this character (from a
-        finalized chapter), drafts UPDATED text for whichever already-filled
-        structured sections that fact actually touches - unlike
-        draft_sections, this can overwrite non-empty sections, folding the
-        new fact into the existing text rather than just filling blanks.
-        Returns a dict of only the sections that changed - the writer
-        reviews/edits each one before saving, same as draft_sections."""
+        finalized chapter), drafts UPDATED text for whichever structured
+        sections that fact actually touches - filled or still blank. For an
+        already-filled section this folds the new fact into the existing
+        text rather than discarding it; for a blank section it drafts fresh
+        text from the fact alone. Returns a dict of only the sections that
+        changed - the writer reviews/edits each one before saving, same as
+        draft_sections.
+
+        chapter_num is the source chapter's book position, not its drafting/
+        finalization order - chapters are often finalized out of sequence, so
+        a fact from chapter 5 finalized AFTER chapter 9 is not necessarily the
+        character's most current state. When known, the prompt tells the AI
+        where this fact falls so it can phrase the addition as "by chapter 5"
+        rather than as the newest development, and avoid overwriting a
+        chronologically-later detail that's already reflected in the
+        section."""
         existing = character.get("sections") or {}
         filled = {k: v for k, v in existing.items() if (v or "").strip()}
-        if not filled:
-            return {}
+        all_keys = list(self.SECTION_LABELS)
 
         filled_lines = "\n".join(f"{self.SECTION_LABELS[k]}: {v}" for k, v in filled.items())
+        blank_labels = [self.SECTION_LABELS[k] for k in all_keys if k not in filled]
+
+        position_note = ""
+        if chapter_num is not None:
+            position_note = f"""
+This fact comes from Chapter {chapter_num}. Chapters are sometimes drafted and
+finalized out of book order, so this is not necessarily the character's most
+recent state - the sections above may already include details from a later
+chapter (higher chapter number) that were finalized earlier. If a section
+already reflects a later chapter, fold this fact in as something true "by
+chapter {chapter_num}" without contradicting or erasing the later detail;
+only treat this fact as the newest development if nothing already there
+implies a later chapter."""
 
         prompt = f"""Character: {character.get('name', '')} ({character.get('role', '')})
 Description: {character.get('description', '')}
 
 Current structured sections:
-{filled_lines}
+{filled_lines or "(none filled in yet)"}
+
+Still-blank sections: {", ".join(blank_labels) or "(none)"}
 
 A newly finalized chapter established this new fact about the character:
 \"\"\"
 {new_facts}
 \"\"\"
+{position_note}
 
-Decide which of the sections above (if any) this fact actually belongs in
-(e.g. a new scar or outfit detail -> Appearance; a new bond or falling-out
--> Relationships; a revealed fear or want -> Goals / Motivation). For each
-section it touches, rewrite that section's full text folding the new fact
-in naturally alongside what's already there - do not just append the raw
-fact, and do not touch sections the new fact doesn't affect. If the fact
-doesn't clearly belong in any of these sections, respond with {{}}.
-Respond with ONLY a JSON object using a subset of these keys: {list(filled)},
-like {{"{next(iter(filled))}": "..."}}"""
+Decide which of these sections (filled or blank) this fact actually belongs
+in (e.g. a new scar or outfit detail -> Appearance; a new bond or
+falling-out -> Relationships; a revealed fear or want -> Goals /
+Motivation). For an already-filled section it touches, rewrite that
+section's full text folding the new fact in naturally alongside what's
+already there - do not just append the raw fact. For a still-blank section
+it touches, draft fresh text from the fact alone. Do not touch sections the
+fact doesn't affect. If the fact doesn't clearly belong in any section,
+respond with {{}}.
+Respond with ONLY a JSON object using a subset of these keys: {all_keys},
+like {{"{all_keys[0]}": "..."}}"""
 
         result = self.ask_json_object(prompt)
-        return {k: result[k] for k in filled if isinstance(result.get(k), str) and result[k].strip()}
+        return {k: result[k] for k in all_keys if isinstance(result.get(k), str) and result[k].strip()}

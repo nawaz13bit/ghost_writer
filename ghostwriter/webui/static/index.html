@@ -61,6 +61,7 @@
       </span>
       <button class="tab-btn rail-btn active" data-tab="manuscript" title="Manuscript">&#9998;</button>
       <button class="tab-btn rail-btn" data-tab="plan" title="Plan">&#9776;</button>
+      <button class="tab-btn rail-btn" data-tab="continuity" id="rail-continuity-btn" title="Continuity">&#128269;<span id="rail-continuity-dot" class="hidden"></span></button>
       <button id="btn-universal-toggle" class="rail-btn" title="Tell it what you want (press /)">&#10024;</button>
       <div class="rail-spacer"></div>
       <button class="tab-btn rail-btn" data-tab="settings" id="rail-settings-btn" title="Settings - prompts, local model, project">
@@ -195,6 +196,7 @@
         <label>Act <input id="oe-act" placeholder="e.g. Act 1" list="act-options"></label>
         <label>Summary <textarea id="oe-summary" placeholder="Short logline (2-3 sentences)."></textarea></label>
         <label>Characters in this chapter <input id="oe-characters" placeholder="Comma-separated names - used to pull in continuity from their nearest other chapter, earlier or later, when writing out of order"></label>
+        <label>Locations / world / objects in this chapter <input id="oe-world-refs" placeholder="Comma-separated names - not shown in the manuscript; tells the consistency checker which chapters to scan when one of these changes"></label>
         <label>Chapter outline <textarea id="oe-outline" rows="8" placeholder="Beat-by-beat outline of what happens in this chapter, from open to close."></textarea></label>
 
         <div id="oe-scenes-section">
@@ -242,6 +244,8 @@
         <p class="modal-hint">Front/back matter for print, ebook, and PDF exports - not used by the AI when drafting.</p>
         <label>Author name <input id="ov-author-name" placeholder="Name as it should appear on the title page and cover"></label>
         <label>Back-cover blurb <textarea id="ov-blurb" placeholder="The pitch that goes on the back cover / retailer description - not exported into the manuscript itself."></textarea></label>
+        <label>Query letter <textarea id="ov-query-letter" placeholder="Draft query letter to send literary agents - hook, short synopsis, and metadata. Not exported into the manuscript itself."></textarea></label>
+        <button id="ov-generate-blurb" title="Drafts both the blurb and query letter from the premise, characters, and outline so far">Generate blurb + query letter with AI</button>
         <label>Copyright page text <textarea id="ov-copyright" placeholder="e.g. Copyright (c) 2026 Jane Author. All rights reserved."></textarea></label>
         <label>Foreword <textarea id="ov-foreword" placeholder="Optional foreword, printed before Chapter 1."></textarea></label>
         <label>Acknowledgments <textarea id="ov-acknowledgments" placeholder="Optional acknowledgments section."></textarea></label>
@@ -297,6 +301,30 @@
         <h4>Factions</h4>
         <div id="cf-checks"></div>
         <button id="cf-save">Save</button>
+      </div>
+
+      <div id="character-reveals" class="hidden cs-field">
+        <h4>Plot-gated reveals</h4>
+        <p class="modal-hint">Facts about this character that only appear in draft prompts once
+          the linked chapter is reached, so a central character can be introduced gradually
+          instead of having their whole bible dumped on first appearance.</p>
+        <div id="cr-list"></div>
+        <div class="settings-row">
+          <label>Unlocks at
+            <select id="cr-chapter"></select>
+          </label>
+          <input type="text" id="cr-section" placeholder="Section tag (optional)">
+        </div>
+        <div class="settings-row">
+          <input type="text" id="cr-suggest-prompt" placeholder="Optional hint for the AI, e.g. 'something about her past'">
+          <button id="cr-suggest" title="Draft a reveal fitting the chosen chapter's storyline, without repeating or contradicting existing sections/reveals">Suggest with AI</button>
+        </div>
+        <div class="settings-row">
+          <textarea id="cr-text" rows="2" placeholder="Reveal text, e.g. 'Secretly the heir's half-brother.'"></textarea>
+        </div>
+        <div class="settings-row">
+          <button id="cr-add">Add reveal</button>
+        </div>
       </div>
 
       <div id="world-objects" class="hidden cs-field">
@@ -435,9 +463,23 @@
       <input id="idea-relates-search" placeholder="Search acts, chapters, characters, world...">
       <select id="idea-relates-to"><option value="">None</option></select>
     </label>
+    <label class="checkbox-label"><input type="checkbox" id="idea-is-thread"> Planted thread (a setup this idea's linked chapter should plant, to be paid off later)</label>
     <div class="modal-actions">
       <button id="idea-cancel">Cancel</button>
       <button id="idea-save" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="integrate-idea-modal-backdrop" class="hidden modal-backdrop">
+  <div id="integrate-idea-modal" class="modal">
+    <h3 id="integrate-idea-modal-title">Integrate Idea into Chapter</h3>
+    <p class="modal-hint">Pick a drafted chapter for the AI to revise so it weaves this idea in. Shows as a normal revision diff - nothing is saved until you approve it. Once approved, the idea is marked resolved and drops off the open backlog.</p>
+    <label>Chapter <select id="ii-chapter"></select></label>
+    <label>Instruction to the AI <textarea id="ii-instruction" rows="4"></textarea></label>
+    <div class="modal-actions">
+      <button id="ii-cancel">Cancel</button>
+      <button id="ii-integrate" class="primary">Integrate</button>
     </div>
   </div>
 </div>
@@ -589,6 +631,6 @@
   </div>
 </div>
 
-<script type="module" src="/static/js/main.js?v=92"></script>
+<script type="module" src="/static/js/main.js?v=96"></script>
 </body>
 </html>

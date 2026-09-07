@@ -44,6 +44,10 @@ def _validate_data(data: dict[str, Any], source: str) -> None:
     for i, c in enumerate(data.get("characters", [])):
         if not isinstance(c, dict) or not isinstance(c.get("name"), str) or not c.get("name"):
             raise ValueError(f"{source}: characters[{i}] missing a valid 'name'")
+        for j, r in enumerate(c.get("reveals") or []):
+            if not isinstance(r, dict) or not isinstance(r.get("id"), int) or not isinstance(r.get("text"), str) \
+                    or not isinstance(r.get("unlock_chapter_num"), int):
+                raise ValueError(f"{source}: characters[{i}].reveals[{j}] missing a valid 'id'/'text'/'unlock_chapter_num'")
     for i, w in enumerate(data.get("world", [])):
         if not isinstance(w, dict) or not isinstance(w.get("name"), str) or not w.get("name"):
             raise ValueError(f"{source}: world[{i}] missing a valid 'name'")
@@ -96,6 +100,7 @@ class StoryBible:
             "series_synced_at": None,
             "author_name": "",
             "blurb": "",
+            "query_letter": "",
             "copyright_text": "",
             "foreword": "",
             "acknowledgments": "",
@@ -164,6 +169,7 @@ class StoryBible:
         data.setdefault("real_world_setting", False)
         data.setdefault("author_name", "")
         data.setdefault("blurb", "")
+        data.setdefault("query_letter", "")
         data.setdefault("copyright_text", "")
         data.setdefault("foreword", "")
         data.setdefault("acknowledgments", "")
@@ -175,6 +181,9 @@ class StoryBible:
             w.setdefault("is_real", False)
         for c in data.get("characters", []):
             c.setdefault("is_real", False)
+            c.setdefault("reveals", [])
+        for idea in data.get("ideas", []):
+            idea.setdefault("category", None)
         for entry in data.get("outline", []):
             _migrate_outline_entry(entry)
         _validate_data(data, str(path))
@@ -394,12 +403,13 @@ class StoryBible:
         act: str | None = None,
         outline: str = "",
         characters: list[str] | None = None,
+        world_refs: list[str] | None = None,
     ) -> dict[str, Any]:
         if self.outline_entry(chapter_num) is not None:
             raise ValueError(f"Outline entry for chapter {chapter_num} already exists")
         entry = {
             "chapter_num": chapter_num, "title": title, "summary": summary, "act": act,
-            "outline": outline, "characters": characters or [],
+            "outline": outline, "characters": characters or [], "world_refs": world_refs or [],
         }
         self.data["outline"].append(entry)
         self.data["outline"].sort(key=lambda o: o["chapter_num"])
@@ -510,11 +520,13 @@ class StoryBible:
     def add_idea(
         self, title: str, notes: str = "",
         linked_kind: str | None = None, linked_id: Any = None,
+        category: str | None = None,
     ) -> dict[str, Any]:
         next_id = max((i["id"] for i in self.data["ideas"]), default=0) + 1
         idea = {
             "id": next_id, "title": title, "notes": notes, "created_at": time.time(),
-            "linked_kind": linked_kind, "linked_id": linked_id,
+            "linked_kind": linked_kind, "linked_id": linked_id, "category": category,
+            "status": "open",
         }
         self.data["ideas"].append(idea)
         self.save()
@@ -601,14 +613,27 @@ class StoryBible:
         already-approved chapter is expected (e.g. a permanent change like a
         character losing an arm). Since later chapters may already assume the
         old facts, they're flagged needs_recheck rather than silently rewritten -
-        a human decides whether/how to fix each one via check-continuity."""
-        was_approved = bool(self.get_chapter(chapter_num) and self.get_chapter(chapter_num).get("approved"))
+        a human decides whether/how to fix each one via check-continuity.
+
+        This also covers out-of-order drafting: chapters aren't necessarily
+        written or first-approved in chapter_num order, so a later chapter
+        can already be approved before an earlier one is ever touched. Even
+        on this chapter's FIRST approval (not just re-approval), any
+        already-approved chapter with a higher chapter_num may have been
+        written assuming facts this chapter has just newly established -
+        flag those for recheck too, not only on re-approval.
+
+        needs_recheck_from records which chapter_num(s) triggered the flag,
+        so the UI can point the writer at the specific chapter to compare
+        against instead of a bare "something changed" warning."""
         self.upsert_chapter(chapter_num, final=text, approved=True)
-        if was_approved:
-            for ch in self.data["chapters"]:
-                if ch["chapter_num"] > chapter_num and ch.get("approved"):
-                    ch["needs_recheck"] = True
-            self.save()
+        for ch in self.data["chapters"]:
+            if ch["chapter_num"] > chapter_num and ch.get("approved"):
+                ch["needs_recheck"] = True
+                triggers = ch.get("needs_recheck_from") or []
+                if chapter_num not in triggers:
+                    ch["needs_recheck_from"] = sorted(triggers + [chapter_num])
+        self.save()
 
     # -- translation (post-finalization final pass) --------------------------
     # A separate per-language field on each chapter, distinct from history/
@@ -727,6 +752,57 @@ class StoryBible:
         c["factions"] = factions
         self.save()
         return c
+
+    # -- plot-gated character reveals --------------------------------------
+    # A character's base name/role/description is always visible in draft
+    # prompts, but deeper facts (backstory, secrets, relationships) can be
+    # withheld until a specific outline beat has actually happened, so a
+    # central character gets introduced organically instead of fully
+    # dumped on their first appearance. Independent of CHARACTER_SECTION_KEYS
+    # above - `section` here is just an optional display grouping tag, not a
+    # link to those text fields. See characters_brief()'s `unlock_chapter_num`
+    # param for how gating is applied (only author.py's draft prompts opt in;
+    # every other caller - consistency checks, voice checks, bible sync,
+    # outlining - sees every reveal regardless of chapter).
+    def add_character_reveal(
+        self, name: str, text: str, unlock_chapter_num: int, section: str | None = None,
+    ) -> dict[str, Any]:
+        c = self.find_character(name)
+        if c is None:
+            raise ValueError(f"No character named {name!r}")
+        if self.outline_entry(unlock_chapter_num) is None:
+            raise ValueError(f"Not a known outline chapter: {unlock_chapter_num!r}")
+        reveals = c.setdefault("reveals", [])
+        next_id = max((r["id"] for r in reveals), default=0) + 1
+        reveal = {
+            "id": next_id, "text": text, "unlock_chapter_num": unlock_chapter_num,
+            "section": section, "created_at": time.time(),
+        }
+        reveals.append(reveal)
+        self.save()
+        return reveal
+
+    def _find_character_reveal(self, name: str, reveal_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
+        c = self.find_character(name)
+        if c is None:
+            raise ValueError(f"No character named {name!r}")
+        for r in c.get("reveals", []):
+            if r["id"] == reveal_id:
+                return c, r
+        raise ValueError(f"No reveal {reveal_id} on character {name!r}")
+
+    def update_character_reveal(self, name: str, reveal_id: int, **fields: Any) -> dict[str, Any]:
+        _, r = self._find_character_reveal(name, reveal_id)
+        if "unlock_chapter_num" in fields and self.outline_entry(fields["unlock_chapter_num"]) is None:
+            raise ValueError(f"Not a known outline chapter: {fields['unlock_chapter_num']!r}")
+        r.update(fields)
+        self.save()
+        return r
+
+    def delete_character_reveal(self, name: str, reveal_id: int) -> None:
+        c, r = self._find_character_reveal(name, reveal_id)
+        c["reveals"].remove(r)
+        self.save()
 
     def set_world_entry_objects(self, name: str, objects: list[str]) -> dict[str, Any]:
         """Sets which object/item world entries a location entry uses - an
@@ -1036,6 +1112,34 @@ class StoryBible:
             lines.extend(issues)
         return "\n".join(lines)
 
+    def planted_threads_brief(self, chapter_num: int) -> str:
+        """Ideas tagged category="planted_thread" and linked to this outline
+        entry - setups an earlier chapter planted (see ThreadPlannerAgent)
+        that this chapter should pay off. Purely additive prompt context.
+        Resolved/dropped threads are excluded - see ThreadPlannerAgent's
+        propose_resolutions, which proposes marking a thread resolved once a
+        chapter pays it off (review-gated, not automatic)."""
+        threads = [
+            i for i in self.data["ideas"]
+            if i.get("category") == "planted_thread"
+            and i.get("linked_kind") == "outline"
+            and i.get("linked_id") == chapter_num
+            and i.get("status", "open") == "open"
+        ]
+        if not threads:
+            return ""
+        return "\n".join(f"- {t['notes'] or t['title']}" for t in threads)
+
+    def open_ideas_brief(self) -> str:
+        """All open backlog ideas (not filtered to planted_thread, unlike
+        planted_threads_brief), for the continuity checker to flag a chapter
+        that contradicts or silently ignores one - purely additive prompt
+        context, not a hard requirement the chapter must satisfy."""
+        ideas = [i for i in self.data["ideas"] if i.get("status", "open") == "open"]
+        if not ideas:
+            return ""
+        return "\n".join(f"- {i['title']}: {i['notes']}" if i.get("notes") else f"- {i['title']}" for i in ideas)
+
     def story_engine_brief(self) -> str:
         """Formats tone/narrative_voice/narrative_engine/themes for prompt
         injection, or "" if the writer hasn't filled any in - callers should
@@ -1058,13 +1162,22 @@ class StoryBible:
             lines.append(f"Themes to keep alive throughout (do not state on the nose): {themes}")
         return "\n".join(lines)
 
-    def characters_brief(self, names: list[str] | None = None) -> str:
+    def characters_brief(self, names: list[str] | None = None, unlock_chapter_num: int | None = None) -> str:
         """`names`, when given, limits the brief to those characters (case-
         insensitive) instead of the whole roster - keeps per-chapter prompts
         (draft/continuity/voice checks) from growing unboundedly with total
         character count as the book gets longer. Callers that genuinely need
         the whole cast (outline building, bible sync, character creation)
-        pass nothing and get the full brief as before."""
+        pass nothing and get the full brief as before.
+
+        `unlock_chapter_num`, when given, additionally gates each
+        character's `reveals` (see add_character_reveal) to only those whose
+        unlock_chapter_num has already been reached - so a central character
+        can be introduced organically instead of fully dumped on their first
+        appearance. Left as None (the default), every reveal is shown
+        regardless of chapter - this is the "ground truth" view every caller
+        except author.py's draft prompts should use (consistency/voice
+        checks, bible sync, outlining all need the full picture)."""
         chars = self.data["characters"]
         if names is not None:
             wanted = {n.strip().lower() for n in names if n and n.strip()}
@@ -1075,6 +1188,11 @@ class StoryBible:
             tag = f" [Factions: {', '.join(factions)}]" if factions else ""
             real_tag = " [REAL PERSON - keep accurate]" if c.get("is_real") else ""
             lines.append(f"- {c['name']} ({c['role']}){tag}{real_tag}: {c['description']}")
+            reveals = c.get("reveals") or []
+            if unlock_chapter_num is not None:
+                reveals = [r for r in reveals if r["unlock_chapter_num"] <= unlock_chapter_num]
+            if reveals:
+                lines.append(f"  Reveals: {'; '.join(r['text'] for r in reveals)}")
         return "\n".join(lines) if lines else "(no characters defined yet)"
 
     def world_brief(self) -> str:
@@ -1087,7 +1205,16 @@ class StoryBible:
         return "\n".join(lines) if lines else "(no world-building notes yet)"
 
     def timeline_brief(self) -> str:
-        events = sorted(self.data.get("timeline", []), key=lambda t: t.get("order", 0))
+        # Sort by the event's place in the book (chapter_num), not by the
+        # order events happened to be extracted/added in - chapters are often
+        # drafted out of sequence, so an event from a later-in-story chapter
+        # drafted first must not appear before an earlier chapter's events
+        # drafted afterward. Undated/no-chapter events (e.g. manually-added
+        # backstory) sort first; "order" only breaks ties within a chapter.
+        events = sorted(
+            self.data.get("timeline", []),
+            key=lambda t: (t.get("chapter_num") if t.get("chapter_num") is not None else -1, t.get("order", 0)),
+        )
         lines = []
         for t in events:
             date = t.get("story_date") or "(undated)"

@@ -14,6 +14,25 @@ class LLMCancelled(RuntimeError):
     """Raised when an in-flight LLM call is stopped via the emergency-stop control."""
 
 
+class LLMTruncated(RuntimeError):
+    """Raised when the server stops generating because max_tokens ran out
+    (finish_reason "length") rather than reaching a natural end. The partial
+    text is still attached so a caller could recover it, but callers should
+    generally treat this as a failed generation rather than a finished one -
+    silently saving cut-off prose as a completed draft/scene would be worse
+    than surfacing the error."""
+
+    def __init__(self, partial_text: str, max_tokens: int):
+        self.partial_text = partial_text
+        self.max_tokens = max_tokens
+        super().__init__(
+            f"The model ran out of tokens (limit was {max_tokens}) before finishing - "
+            "the output was cut off mid-generation. Try again with a shorter target "
+            "length, or increase generation.max_tokens / raise chapter_target_words "
+            "headroom in config."
+        )
+
+
 # Registry of in-flight calls' cancel signals, so a single "stop" action from
 # the UI can halt whatever's running right now regardless of which agent or
 # job thread started it - this is a single-user local app, so one global
@@ -75,6 +94,7 @@ class LLMClient:
             _active_events[call_id] = event
         try:
             accumulated = []
+            finish_reason = None
             with requests.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=600, stream=True) as r:
                 r.raise_for_status()
                 # The stream endpoint doesn't send a charset, so requests would
@@ -91,14 +111,22 @@ class LLMClient:
                     if chunk.strip() == "[DONE]":
                         break
                     try:
-                        delta = json.loads(chunk)["choices"][0]["delta"].get("content")
+                        choice = json.loads(chunk)["choices"][0]
                     except (json.JSONDecodeError, KeyError, IndexError):
                         continue
+                    # finish_reason arrives on the last chunk (often alongside
+                    # an empty delta), so it must be captured independently of
+                    # whether this chunk carries any text.
+                    finish_reason = choice.get("finish_reason") or finish_reason
+                    delta = choice.get("delta", {}).get("content")
                     if delta:
                         accumulated.append(delta)
                         if on_delta is not None:
                             on_delta("".join(accumulated))
-            return "".join(accumulated).strip()
+            text = "".join(accumulated).strip()
+            if finish_reason == "length":
+                raise LLMTruncated(text, payload["max_tokens"])
+            return text
         finally:
             with _registry_lock:
                 _active_events.pop(call_id, None)

@@ -50,6 +50,9 @@ function applyTab() {
   } else if (activeTab === "plan") {
     showSidebar();
     selectItem("overview", "engine");
+  } else if (activeTab === "continuity") {
+    showSidebar();
+    selectItem("overview", "continuity");
   } else if (activeTab === "settings") {
     $("tab-panel-settings").classList.remove("hidden");
     loadPrompts().catch(() => {});
@@ -58,6 +61,6 @@ function applyTab() {
 }
 
 export function setActiveTab(tab) {
-  activeTab = tab;
+  activeTab = tab === "settings" && activeTab === "settings" ? "manuscript" : tab;
   applyTab();
 }

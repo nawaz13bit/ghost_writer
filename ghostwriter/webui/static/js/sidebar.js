@@ -9,7 +9,7 @@
 // editor.js's own renameEntity()/deleteEntity() are wired to drawer state
 // (state.selection + drawer inputs) rather than being callable standalone.
 import { $, api, kindLabel, markTouched, setStatus, state, uiConfirm, uiPrompt } from "./api.js";
-import { chapterStatusBadge, closeDrawer, entityStatusBadge, getChapter, linkedIdeasFor, openEntityModal, openIdeaModal, openOutlineModal, openPromoteIdeaModal, selectItem, setNewEntityCategory } from "./editor.js";
+import { chapterStatusBadge, checkConsistencyForItem, closeDrawer, entityStatusBadge, getChapter, ideaStatusBadge, linkedIdeasFor, openEntityModal, openIdeaModal, openIntegrateIdeaModal, openOutlineModal, openPromoteIdeaModal, renderEditor, selectItem, setNewEntityCategory } from "./editor.js";
 import { selectChapter } from "./manuscript.js";
 import { refreshBible } from "./projects.js";
 import { setActiveTab } from "./tabs.js";
@@ -78,14 +78,21 @@ function leavesFor(branchKey) {
       .map(e => ({ id: e.name, name: e.name, record: e }));
   }
   if (branchKey === "timeline") {
-    return (state.bible.timeline || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0))
-      .map(e => ({ id: e.name, name: e.story_date ? `${e.story_date}: ${e.name}` : e.name, record: e }));
+    // Sort by the event's place in the book (chapter_num), not creation
+    // order - chapters are often drafted out of sequence, so an event from
+    // a later chapter drafted first must not appear before an earlier
+    // chapter's event drafted afterward. Undated/no-chapter events sort
+    // first; "order" only breaks ties within the same chapter.
+    return (state.bible.timeline || []).slice().sort((a, b) => {
+      const ca = a.chapter_num ?? -1, cb = b.chapter_num ?? -1;
+      return ca !== cb ? ca - cb : (a.order || 0) - (b.order || 0);
+    }).map(e => ({ id: e.name, name: e.story_date ? `${e.story_date}: ${e.name}` : e.name, record: e }));
   }
   return (state.bible[branchKey] || []).map(e => ({ id: e.name || e.topic, name: e.name || e.topic, record: e }));
 }
 
 function leafStatusBadge(branchKey, leaf) {
-  if (branchKey === "ideas") return null;
+  if (branchKey === "ideas") return ideaStatusBadge(leaf.record);
   if (branchKey === "outline") {
     const ch = getChapter(leaf.id);
     return ch ? chapterStatusBadge(ch) : null;
@@ -169,7 +176,15 @@ async function deleteLeaf(kind, name) {
   setStatus("Deleting...");
   await api(`/api/projects/${encodeURIComponent(state.slug)}/entities/${kind}/${encodeURIComponent(name)}`, { method: "DELETE" });
   await refreshBible();
-  if (state.selection && state.selection.kind === kind && state.selection.id === name) closeDrawer();
+  if (state.selection && state.selection.kind === kind && state.selection.id === name) {
+    closeDrawer();
+  } else if (state.selection) {
+    // A deleted world/faction/character entity can be cross-referenced by
+    // whatever else is currently open (e.g. a character's faction checkbox
+    // list, or a location's used-objects list) - refresh it in place so it
+    // doesn't keep offering/showing the now-deleted entity.
+    renderEditor();
+  }
   renderSidebar();
   setStatus("Deleted.");
 }
@@ -287,11 +302,21 @@ function buildLeaf(branchKey, leaf) {
     promote.textContent = "Promote to outline";
     promote.addEventListener("click", () => { closeLeafMenus(); openPromoteIdeaModal(leaf.record); });
     menu.appendChild(promote);
+    const integrate = document.createElement("button");
+    integrate.textContent = "Integrate into chapter";
+    integrate.title = "Have the AI revise a drafted chapter to weave this idea in (review/approve like any other revision).";
+    integrate.addEventListener("click", () => { closeLeafMenus(); openIntegrateIdeaModal(leaf.record); });
+    menu.appendChild(integrate);
     const del = document.createElement("button");
     del.textContent = "Delete";
     del.addEventListener("click", () => { closeLeafMenus(); deleteIdeaLeaf(leaf.id, leaf.name); });
     menu.appendChild(del);
   } else if (branchKey === "outline") {
+    const check = document.createElement("button");
+    check.textContent = "Consistency check";
+    check.title = "Check this chapter's storyline/outline (and drafted narrative, if any) against the rest of the bible.";
+    check.addEventListener("click", () => { closeLeafMenus(); checkConsistencyForItem("outline", leaf.id, `Chapter ${leaf.id}`); });
+    menu.appendChild(check);
     const del = document.createElement("button");
     del.textContent = "Delete";
     del.addEventListener("click", () => { closeLeafMenus(); deleteOutlineLeaf(leaf.id); });
@@ -302,6 +327,13 @@ function buildLeaf(branchKey, leaf) {
     rename.textContent = "Rename";
     rename.addEventListener("click", () => { closeLeafMenus(); renameLeaf(kind, leaf.id); });
     menu.appendChild(rename);
+    const check = document.createElement("button");
+    check.textContent = "Consistency check";
+    check.title = kind === "characters"
+      ? "Check this character - including its sections and reveals - against the rest of the bible."
+      : "Check this item against the rest of the bible.";
+    check.addEventListener("click", () => { closeLeafMenus(); checkConsistencyForItem(kind, leaf.id, leaf.name); });
+    menu.appendChild(check);
     const del = document.createElement("button");
     del.textContent = "Delete";
     del.addEventListener("click", () => { closeLeafMenus(); deleteLeaf(kind, leaf.id); });
@@ -347,7 +379,40 @@ export function renderSidebar() {
   renderOneSidebar("tree-sidebar", LEFT_BRANCHES);
   renderOneSidebar("entity-sidebar", RIGHT_BRANCHES);
   renderBibliographyLink();
+  renderContinuityLink();
   renderCritiqueLink();
+}
+
+// Master Bible / Continuity dashboard - a standalone link like Bibliography
+// and Critique below, so it's reachable from anywhere instead of only via
+// the button buried in a chapter's own utility rail (which requires opening
+// some chapter first). Count mirrors that button's: flagged chapters
+// (continuity_issues or needs_recheck) plus open continuity_flags entries.
+function renderContinuityLink() {
+  const root = $("tree-sidebar");
+  if (!root || !state.slug) return;
+  const section = document.createElement("div");
+  section.className = "sb-branch";
+  const head = document.createElement("div");
+  head.className = "sb-branch-head";
+  const title = document.createElement("span");
+  title.className = "sb-branch-title";
+  const flaggedChapters = (state.bible.chapters || []).filter(
+    ch => (ch.continuity_issues || []).length || ch.needs_recheck
+  ).length;
+  const openFlags = (state.bible.continuity_flags || []).length;
+  const openCount = flaggedChapters + openFlags;
+  title.textContent = openCount ? `Continuity (${openCount})` : "Continuity";
+  head.appendChild(title);
+  head.addEventListener("click", () => selectItem("overview", "continuity"));
+  section.appendChild(head);
+  root.appendChild(section);
+
+  const railDot = $("rail-continuity-dot");
+  if (railDot) {
+    railDot.classList.toggle("hidden", !openCount);
+    railDot.textContent = openCount || "";
+  }
 }
 
 // Non-fiction-only book-level view of every cited research note, alongside

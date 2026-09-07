@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from ghostwriter.agents.base import AIOutputError
 from ghostwriter.llm_client import LLMCancelled
 from ghostwriter.memory.story_bible import StoryBible
-from ghostwriter.webui.deps import load_bible, maybe_compact_history
+from ghostwriter.webui.deps import load_bible, maybe_compact_history, with_bible_lock
 from ghostwriter.webui.diffing import word_diff
 from ghostwriter.webui.state import character_builder, researcher, reviser, world_builder
 
@@ -80,6 +80,7 @@ class ApproveRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/entities/characters")
+@with_bible_lock
 def create_character(slug: str, req: NewCharacterRequest) -> dict[str, Any]:
     bible = load_bible(slug)
     if bible.find_character(req.name) is not None:
@@ -93,6 +94,7 @@ class SetCharacterRealRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/entities/characters/{name}/real")
+@with_bible_lock
 def set_character_real(slug: str, name: str, req: SetCharacterRealRequest) -> dict[str, Any]:
     """Marks/unmarks a character as a real person who must stay factually
     accurate - the character-side counterpart to set_world_entry_real."""
@@ -103,15 +105,33 @@ def set_character_real(slug: str, name: str, req: SetCharacterRealRequest) -> di
         raise HTTPException(404, str(exc))
 
 
-@router.post("/api/projects/{slug}/entities/characters/suggest")
-def suggest_character(slug: str, req: SuggestEntityRequest) -> dict[str, Any]:
+# Kinds with an AI "suggest one" flow, each via .suggest_one(bible, prompt) -
+# not the full ENTITY_KINDS: timeline has no suggest today, and reveal/
+# outline suggest are shaped differently and stay as their own routes.
+SUGGEST_KIND_AGENT = {
+    "characters": character_builder,
+    "world": world_builder,
+    "research_notes": researcher,
+}
+SUGGEST_KIND_ERROR = {
+    "characters": "A description is required",
+    "world": "A description is required",
+    "research_notes": "A topic is required",
+}
+
+
+@router.post("/api/projects/{slug}/entities/{kind}/suggest")
+def suggest_entity(slug: str, kind: str, req: SuggestEntityRequest) -> dict[str, Any]:
+    if kind not in SUGGEST_KIND_AGENT:
+        raise HTTPException(400, f"Unsupported entity kind {kind!r}")
     if not req.prompt.strip():
-        raise HTTPException(400, "A description is required")
+        raise HTTPException(400, SUGGEST_KIND_ERROR[kind])
     bible = load_bible(slug)
-    return character_builder.suggest_one(bible, req.prompt)
+    return SUGGEST_KIND_AGENT[kind].suggest_one(bible, req.prompt)
 
 
 @router.post("/api/projects/{slug}/entities/world")
+@with_bible_lock
 def create_world_entry(slug: str, req: NewWorldEntryRequest) -> dict[str, Any]:
     bible = load_bible(slug)
     if bible.find_world_entry(req.name) is not None:
@@ -125,6 +145,7 @@ class SetWorldRealRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/entities/world/{name}/real")
+@with_bible_lock
 def set_world_entry_real(slug: str, name: str, req: SetWorldRealRequest) -> dict[str, Any]:
     """Marks/unmarks a world entry as a real place that must stay factually
     accurate, distinct from its (freeform) category - so the same entry can
@@ -141,6 +162,7 @@ class SetWorldCategoryRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/entities/world/{name}/category")
+@with_bible_lock
 def set_world_entry_category(slug: str, name: str, req: SetWorldCategoryRequest) -> dict[str, Any]:
     """Moves a world entry between the sidebar's Factions/Locations/
     Objects-Items/World(other) buckets by changing its category field."""
@@ -154,30 +176,16 @@ def set_world_entry_category(slug: str, name: str, req: SetWorldCategoryRequest)
         raise HTTPException(404, str(exc))
 
 
-@router.post("/api/projects/{slug}/entities/world/suggest")
-def suggest_world_entry(slug: str, req: SuggestEntityRequest) -> dict[str, Any]:
-    if not req.prompt.strip():
-        raise HTTPException(400, "A description is required")
-    bible = load_bible(slug)
-    return world_builder.suggest_one(bible, req.prompt)
-
-
 @router.post("/api/projects/{slug}/world/migrate-import-notes")
+@with_bible_lock
 def migrate_import_notes(slug: str) -> dict[str, Any]:
     bible = load_bible(slug)
     moved = bible.migrate_import_notes()
     return {"moved": moved}
 
 
-@router.post("/api/projects/{slug}/entities/research_notes/suggest")
-def suggest_note(slug: str, req: SuggestEntityRequest) -> dict[str, Any]:
-    if not req.prompt.strip():
-        raise HTTPException(400, "A topic is required")
-    bible = load_bible(slug)
-    return researcher.suggest_one(bible, req.prompt)
-
-
 @router.post("/api/projects/{slug}/entities/research_notes")
+@with_bible_lock
 def create_note(slug: str, req: NewNoteRequest) -> dict[str, Any]:
     bible = load_bible(slug)
     if bible.get_entity("research_notes", req.name) is not None:
@@ -188,6 +196,7 @@ def create_note(slug: str, req: NewNoteRequest) -> dict[str, Any]:
 
 
 @router.post("/api/projects/{slug}/entities/timeline")
+@with_bible_lock
 def create_timeline_event(slug: str, req: NewTimelineEventRequest) -> dict[str, Any]:
     bible = load_bible(slug)
     if bible.find_timeline_event(req.name) is not None:
@@ -201,6 +210,7 @@ def create_timeline_event(slug: str, req: NewTimelineEventRequest) -> dict[str, 
 
 
 @router.post("/api/projects/{slug}/entities/timeline/{name}/consequence")
+@with_bible_lock
 def set_timeline_consequence(slug: str, name: str, req: TimelineConsequence | None = None) -> dict[str, Any]:
     """Sets (or, with an empty body, clears) the status-change consequence on
     an existing timeline event - e.g. marking "The Siege of Kell" as the event
@@ -220,6 +230,7 @@ class CharacterSectionsRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/characters/{name}/sections")
+@with_bible_lock
 def save_character_sections(slug: str, name: str, req: CharacterSectionsRequest) -> dict[str, Any]:
     """Directly saves one or more structured character sections (appearance,
     personality, background, goals/motivation, relationships, arc) - no
@@ -237,6 +248,7 @@ class CharacterFactionsRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/characters/{name}/factions")
+@with_bible_lock
 def save_character_factions(slug: str, name: str, req: CharacterFactionsRequest) -> dict[str, Any]:
     """Sets which faction/species/culture world entries this character is
     affiliated with - an explicit, curated link (distinct from the canvas's
@@ -249,11 +261,87 @@ def save_character_factions(slug: str, name: str, req: CharacterFactionsRequest)
         raise HTTPException(404 if "No character" in str(exc) else 400, str(exc))
 
 
+class CharacterRevealRequest(BaseModel):
+    text: str
+    unlock_chapter_num: int
+    section: str | None = None
+
+
+@router.post("/api/projects/{slug}/characters/{name}/reveals")
+@with_bible_lock
+def create_character_reveal(slug: str, name: str, req: CharacterRevealRequest) -> dict[str, Any]:
+    """Adds a plot-gated reveal: a fact about this character that only
+    appears in draft prompts once the linked outline chapter has been
+    reached, so a central character can be introduced organically instead
+    of having their whole bible dumped on first appearance."""
+    bible = load_bible(slug)
+    try:
+        return bible.add_character_reveal(name, req.text, req.unlock_chapter_num, req.section)
+    except ValueError as exc:
+        raise HTTPException(404 if "No character" in str(exc) else 400, str(exc))
+
+
+class CharacterRevealEditRequest(BaseModel):
+    text: str | None = None
+    unlock_chapter_num: int | None = None
+    section: str | None = None
+
+
+@router.post("/api/projects/{slug}/characters/{name}/reveals/{reveal_id}/edit")
+@with_bible_lock
+def edit_character_reveal(slug: str, name: str, reveal_id: int, req: CharacterRevealEditRequest) -> dict[str, Any]:
+    bible = load_bible(slug)
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    try:
+        return bible.update_character_reveal(name, reveal_id, **fields)
+    except ValueError as exc:
+        raise HTTPException(404 if "No character" in str(exc) or "No reveal" in str(exc) else 400, str(exc))
+
+
+@router.delete("/api/projects/{slug}/characters/{name}/reveals/{reveal_id}")
+@with_bible_lock
+def remove_character_reveal(slug: str, name: str, reveal_id: int) -> dict[str, Any]:
+    bible = load_bible(slug)
+    try:
+        bible.delete_character_reveal(name, reveal_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    return {"ok": True}
+
+
+class SuggestRevealRequest(BaseModel):
+    unlock_chapter_num: int
+    section: str | None = None
+    prompt: str = ""
+
+
+@router.post("/api/projects/{slug}/characters/{name}/reveals/suggest")
+def suggest_character_reveal(slug: str, name: str, req: SuggestRevealRequest) -> dict[str, Any]:
+    """Drafts a plot-gated reveal for this character with AI - using the
+    target chapter's outline plus the character's sections and already-planned
+    reveals as context - for the writer to review/edit before saving via the
+    normal POST .../reveals call. Nothing is persisted here."""
+    bible = load_bible(slug)
+    character = bible.find_character(name)
+    if character is None:
+        raise HTTPException(404, f"No character named {name!r}")
+    try:
+        return character_builder.suggest_reveal(
+            bible, character, req.unlock_chapter_num, req.section, req.prompt
+        )
+    except AIOutputError as exc:
+        logger.exception("Suggest reveal failed for project %r character %r", slug, name)
+        raise HTTPException(502, f"The AI returned an unexpected response ({exc}) - try again.")
+    except LLMCancelled:
+        raise HTTPException(409, "Stopped by user.")
+
+
 class WorldObjectsRequest(BaseModel):
     objects: list[str]
 
 
 @router.post("/api/projects/{slug}/world/{name}/objects")
+@with_bible_lock
 def save_world_entry_objects(slug: str, name: str, req: WorldObjectsRequest) -> dict[str, Any]:
     """Sets which object/item world entries a location entry uses - an
     explicit, curated link (same pattern as the character/factions link)
@@ -285,6 +373,7 @@ def draft_character_sections(slug: str, name: str) -> dict[str, Any]:
 
 class ResyncSectionsRequest(BaseModel):
     new_facts: str
+    chapter_num: int | None = None
 
 
 @router.post("/api/projects/{slug}/characters/{name}/sections/resync")
@@ -293,13 +382,16 @@ def resync_character_sections(slug: str, name: str, req: ResyncSectionsRequest) 
     chapter), drafts updated text for whichever already-filled sections that
     fact touches, for the writer to review/edit before saving - nothing is
     persisted here. Unlike /sections/draft, this can revise non-empty
-    sections rather than only filling blanks."""
+    sections rather than only filling blanks.
+
+    chapter_num (the source chapter's book position) lets the AI account for
+    out-of-order finalization - see resync_sections' docstring."""
     bible = load_bible(slug)
     character = bible.find_character(name)
     if character is None:
         raise HTTPException(404, f"No character named {name!r}")
     try:
-        sections = character_builder.resync_sections(bible, character, req.new_facts)
+        sections = character_builder.resync_sections(bible, character, req.new_facts, req.chapter_num)
     except AIOutputError as exc:
         logger.exception("Resync sections failed for project %r character %r", slug, name)
         raise HTTPException(502, f"The AI returned an unexpected response ({exc}) - try again.")
@@ -309,6 +401,7 @@ def resync_character_sections(slug: str, name: str, req: ResyncSectionsRequest) 
 
 
 @router.delete("/api/projects/{slug}/entities/{kind}/{name}")
+@with_bible_lock
 def delete_entity(slug: str, kind: str, name: str) -> dict[str, Any]:
     if kind not in ENTITY_KINDS:
         raise HTTPException(400, f"Unknown entity kind {kind!r}")
@@ -325,6 +418,7 @@ class RenameEntityRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/entities/{kind}/{name}/rename")
+@with_bible_lock
 def rename_entity(slug: str, kind: str, name: str, req: RenameEntityRequest) -> dict[str, Any]:
     if kind not in ENTITY_KINDS:
         raise HTTPException(400, f"Unknown entity kind {kind!r}")
@@ -337,6 +431,7 @@ def rename_entity(slug: str, kind: str, name: str, req: RenameEntityRequest) -> 
 
 
 @router.post("/api/projects/{slug}/entities/{kind}/{name}/revise")
+@with_bible_lock
 def revise_entity(slug: str, kind: str, name: str, req: InstructionRequest) -> dict[str, Any]:
     if kind not in ENTITY_KINDS:
         raise HTTPException(400, f"Unknown entity kind {kind!r}")
@@ -354,6 +449,7 @@ def revise_entity(slug: str, kind: str, name: str, req: InstructionRequest) -> d
 
 
 @router.post("/api/projects/{slug}/entities/{kind}/{name}/edit")
+@with_bible_lock
 def edit_entity(slug: str, kind: str, name: str, req: ManualEditRequest) -> dict[str, Any]:
     """Hand-typed edit for a character/world entry, bypassing the LLM reviser."""
     if kind not in ENTITY_KINDS:
@@ -371,6 +467,7 @@ def edit_entity(slug: str, kind: str, name: str, req: ManualEditRequest) -> dict
 
 
 @router.post("/api/projects/{slug}/entities/{kind}/{name}/approve")
+@with_bible_lock
 def approve_entity(slug: str, kind: str, name: str, req: ApproveRequest) -> dict[str, Any]:
     if kind not in ENTITY_KINDS:
         raise HTTPException(400, f"Unknown entity kind {kind!r}")

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -15,11 +14,14 @@ from pydantic import BaseModel
 from ghostwriter.agents.base import AIOutputError
 from ghostwriter.llm_client import LLMCancelled
 from ghostwriter.memory.story_bible import slugify
-from ghostwriter.webui.deps import current_chapter_text, get_author, load_bible, maybe_compact_history, require_chapter
+from ghostwriter.webui.deps import (
+    current_chapter_text, get_author, load_bible, maybe_compact_history, require_chapter, with_bible_lock,
+)
 from ghostwriter.webui.diffing import word_diff
+from ghostwriter.webui.jobs import JobStore
 from ghostwriter.webui.state import (
-    bible_manager, book_critique, copy_editor, craft_checker, editor, fact_checker, outliner,
-    pacing_checker, researcher, reviser, stakes_checker, timeline_extractor, translators, voice_checker,
+    bible_manager, book_critique, continuity_checker, copy_editor, craft_checker, editor, fact_checker, outliner,
+    pacing_checker, researcher, reviser, stakes_checker, thread_planner, timeline_extractor, translators, voice_checker,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,13 +37,14 @@ class ApproveRequest(BaseModel):
     history_id: int
 
 
-# In-memory job stores for the streaming draft/revise calls' live progress -
-# same single-user-local pattern as _finalize_jobs below, just keyed
-# separately since these are simpler (one LLM call, no step list).
-_draft_jobs: dict[str, dict[str, Any]] = {}
-_revise_jobs: dict[str, dict[str, Any]] = {}
-_critique_book_jobs: dict[str, dict[str, Any]] = {}
-_translate_book_jobs: dict[str, dict[str, Any]] = {}
+# In-memory job stores for the various long-running AI pipelines' live
+# progress - see JobStore's docstring for why each feature gets its own
+# store despite sharing the same lifecycle plumbing.
+_draft_jobs = JobStore()
+_revise_jobs = JobStore()
+_critique_book_jobs = JobStore()
+_book_consistency_jobs = JobStore()
+_translate_book_jobs = JobStore()
 
 CRITIQUE_CHECKERS = [pacing_checker, stakes_checker, craft_checker]
 
@@ -71,8 +74,9 @@ def _assign_note_ids(bible, proposals: list[dict]) -> list[dict]:
     return proposals
 
 
+@with_bible_lock
 def _run_draft_job(job_id: str, slug: str, chapter_num: int) -> None:
-    job = _draft_jobs[job_id]
+    job = _draft_jobs.get(job_id)
     try:
         bible = load_bible(slug)
         entry = bible.outline_entry(chapter_num)
@@ -113,11 +117,9 @@ def draft_chapter(slug: str, chapter_num: int) -> dict[str, Any]:
     if bible.outline_entry(chapter_num) is None:
         raise HTTPException(404, f"No outline entry for chapter {chapter_num}")
 
-    job_id = uuid.uuid4().hex
-    _draft_jobs[job_id] = {
-        "done": False, "error": None, "result": None, "partial_text": "",
-        "phase": "drafting", "research_proposals": [],
-    }
+    job_id = _draft_jobs.create({
+        "partial_text": "", "phase": "drafting", "research_proposals": [],
+    })
     threading.Thread(target=_run_draft_job, args=(job_id, slug, chapter_num), daemon=True).start()
     return {"job_id": job_id}
 
@@ -130,8 +132,9 @@ def draft_chapter_status(slug: str, chapter_num: int, job_id: str) -> dict[str, 
     return job
 
 
+@with_bible_lock
 def _run_revise_job(job_id: str, slug: str, chapter_num: int, instruction: str) -> None:
-    job = _revise_jobs[job_id]
+    job = _revise_jobs.get(job_id)
     try:
         bible = load_bible(slug)
         ch = require_chapter(bible, chapter_num)
@@ -173,11 +176,9 @@ def revise_chapter(slug: str, chapter_num: int, req: InstructionRequest) -> dict
     if not current_chapter_text(ch):
         raise HTTPException(400, "Chapter has no draft yet")
 
-    job_id = uuid.uuid4().hex
-    _revise_jobs[job_id] = {
-        "done": False, "error": None, "result": None, "partial_text": "",
-        "phase": "revising", "research_proposals": [],
-    }
+    job_id = _revise_jobs.create({
+        "partial_text": "", "phase": "revising", "research_proposals": [],
+    })
     threading.Thread(
         target=_run_revise_job, args=(job_id, slug, chapter_num, req.instruction), daemon=True
     ).start()
@@ -197,6 +198,7 @@ class ManualEditRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/chapters/{chapter_num}/edit")
+@with_bible_lock
 def edit_chapter(slug: str, chapter_num: int, req: ManualEditRequest) -> dict[str, Any]:
     """Records a hand-typed edit directly, without going through the LLM
     reviser - for small fixes the writer would rather just type than explain
@@ -218,6 +220,7 @@ def edit_chapter(slug: str, chapter_num: int, req: ManualEditRequest) -> dict[st
 
 
 @router.delete("/api/projects/{slug}/chapters/{chapter_num}")
+@with_bible_lock
 def delete_chapter(slug: str, chapter_num: int) -> dict[str, Any]:
     """Removes a drafted/revised chapter's text and history entirely - the
     outline entry (if any) is untouched, so the chapter slot stays available
@@ -240,10 +243,8 @@ _FINALIZE_STEPS = [
     ("outline_sync", "Syncing outline"),
 ]
 
-# In-memory job store for the finalize pipeline's progress bar. Single-user
-# local app, so no persistence/expiry needed - jobs just accumulate for the
-# life of the server process.
-_finalize_jobs: dict[str, dict[str, Any]] = {}
+# Job store for the finalize pipeline's progress bar.
+_finalize_jobs = JobStore()
 
 
 def _guard_rewrite(original: str, rewritten: str, step: str) -> str:
@@ -262,8 +263,9 @@ def _guard_rewrite(original: str, rewritten: str, step: str) -> str:
     return rewritten
 
 
+@with_bible_lock
 def _run_finalize_job(job_id: str, slug: str, chapter_num: int, history_id: int) -> None:
-    job = _finalize_jobs[job_id]
+    job = _finalize_jobs.get(job_id)
 
     def advance(step_key: str) -> None:
         idx = next(i for i, (key, _) in enumerate(_FINALIZE_STEPS) if key == step_key)
@@ -306,19 +308,51 @@ def _run_finalize_job(job_id: str, slug: str, chapter_num: int, history_id: int)
             bible.approve_chapter(chapter_num, polished)
             bible.upsert_chapter(chapter_num, summary=summary, word_count=len(polished.split()), continuity_issues=issues)
 
+        # From here on, the chapter itself is already approved and saved above
+        # (text, summary, word_count, continuity_issues) - these remaining
+        # steps are derived syncs (bible/timeline/thread proposals, outline
+        # regen). Each is independent of the others, so each gets its own
+        # try/except: one failing (e.g. a malformed-JSON AIOutputError from
+        # the bible proposal call) must not prevent the rest from running -
+        # previously a single early failure here silently skipped timeline
+        # extraction and outline sync too, with no recovery.
+        sync_errors: list[str] = []
+
         advance("bible_sync")
-        job["bible_proposals"] = bible_manager.propose_from_chapter(bible, chapter_num, polished)
-        job["timeline_proposals"] = timeline_extractor.propose_from_chapter(bible, chapter_num, polished)
+        try:
+            job["bible_proposals"] = bible_manager.propose_from_chapter(bible, chapter_num, polished)
+        except Exception as exc:
+            sync_errors.append(f"Bible sync: {exc}")
+        try:
+            job["timeline_proposals"] = timeline_extractor.propose_from_chapter(bible, chapter_num, polished)
+        except Exception as exc:
+            sync_errors.append(f"Timeline sync: {exc}")
+        try:
+            job["thread_proposals"] = thread_planner.propose_from_chapter(bible, chapter_num, polished)
+        except Exception as exc:
+            sync_errors.append(f"Thread sync: {exc}")
+        try:
+            job["resolve_proposals"] = thread_planner.propose_resolutions(bible, chapter_num, polished)
+        except Exception as exc:
+            sync_errors.append(f"Thread resolution sync: {exc}")
 
         advance("outline_sync")
-        entry = bible.outline_entry(chapter_num)
-        if entry is not None:
-            entry = outliner.regenerate_chapter(bible, chapter_num, final_text=polished)
-            if entry.get("title"):
-                bible.upsert_chapter(chapter_num, title=entry["title"])
+        try:
+            entry = bible.outline_entry(chapter_num)
+            if entry is not None:
+                entry = outliner.regenerate_chapter(bible, chapter_num, final_text=polished)
+                if entry.get("title"):
+                    bible.upsert_chapter(chapter_num, title=entry["title"])
+        except Exception as exc:
+            sync_errors.append(f"Outline sync: {exc}")
 
         job["step_index"] = len(_FINALIZE_STEPS)
         job["result"] = bible.get_chapter(chapter_num)
+        if sync_errors:
+            job["error"] = (
+                "Chapter approved, but some follow-up syncs failed (use the chapter's "
+                '"Re-sync bible/timeline updates" action to retry them): ' + "; ".join(sync_errors)
+            )
     except Exception as exc:
         job["error"] = str(exc)
     finally:
@@ -341,17 +375,15 @@ def start_approve_chapter(slug: str, chapter_num: int, req: ApproveRequest) -> d
     if not (0 <= req.history_id < len(history)):
         raise HTTPException(404, "No such revision")
 
-    job_id = uuid.uuid4().hex
-    _finalize_jobs[job_id] = {
-        "done": False,
-        "error": None,
-        "result": None,
+    job_id = _finalize_jobs.create({
         "bible_proposals": [],
         "timeline_proposals": [],
+        "thread_proposals": [],
+        "resolve_proposals": [],
         "step_index": 0,
         "total_steps": len(_FINALIZE_STEPS),
         "label": _FINALIZE_STEPS[0][1],
-    }
+    })
     threading.Thread(
         target=_run_finalize_job, args=(job_id, slug, chapter_num, req.history_id), daemon=True
     ).start()
@@ -366,28 +398,111 @@ def approve_chapter_status(slug: str, chapter_num: int, job_id: str) -> dict[str
     return job
 
 
+_BIBLE_SYNC_STEPS = [
+    ("bible_sync", "Checking character/faction/world bible"),
+    ("timeline_sync", "Checking timeline"),
+    ("thread_sync", "Checking upcoming threads"),
+    ("resolve_sync", "Checking paid-off threads"),
+]
+
+# Separate job store from _finalize_jobs - this recovery action can be run
+# independently of (and concurrently with) a finalize pipeline job.
+_bible_sync_jobs = JobStore()
+
+
+def _run_bible_sync_job(job_id: str, slug: str, chapter_num: int) -> None:
+    """Body of the old synchronous sync_chapter_bible endpoint, moved to a
+    background thread. Each of the three proposal agents now batches its
+    reference-data dump (see Agent.ask_json_batched) once a project's bible
+    grows large, which can turn this from 3 LLM calls into a dozen+ - too
+    long to hold open one HTTP request for, with no progress feedback in
+    the meantime. Runs the same job-polling pattern as _run_finalize_job."""
+    job = _bible_sync_jobs.get(job_id)
+
+    def advance(step_key: str) -> None:
+        idx = next(i for i, (key, _) in enumerate(_BIBLE_SYNC_STEPS) if key == step_key)
+        job["step_index"] = idx
+        job["label"] = _BIBLE_SYNC_STEPS[idx][1]
+
+    try:
+        bible = load_bible(slug)
+        ch = require_chapter(bible, chapter_num)
+        text = current_chapter_text(ch)
+        if not text:
+            raise ValueError("Chapter has no finalized text yet")
+
+        errors: list[str] = []
+        advance("bible_sync")
+        try:
+            job["bible_proposals"] = bible_manager.propose_from_chapter(bible, chapter_num, text)
+        except Exception as exc:
+            logger.exception("Bible sync failed for project %r chapter %r", slug, chapter_num)
+            errors.append(f"Bible sync: {exc}")
+        advance("timeline_sync")
+        try:
+            job["timeline_proposals"] = timeline_extractor.propose_from_chapter(bible, chapter_num, text)
+        except Exception as exc:
+            logger.exception("Timeline sync failed for project %r chapter %r", slug, chapter_num)
+            errors.append(f"Timeline sync: {exc}")
+        advance("thread_sync")
+        try:
+            job["thread_proposals"] = thread_planner.propose_from_chapter(bible, chapter_num, text)
+        except Exception as exc:
+            logger.exception("Thread sync failed for project %r chapter %r", slug, chapter_num)
+            errors.append(f"Thread sync: {exc}")
+        advance("resolve_sync")
+        try:
+            job["resolve_proposals"] = thread_planner.propose_resolutions(bible, chapter_num, text)
+        except Exception as exc:
+            logger.exception("Thread resolution sync failed for project %r chapter %r", slug, chapter_num)
+            errors.append(f"Thread resolution sync: {exc}")
+
+        job["step_index"] = len(_BIBLE_SYNC_STEPS)
+        if errors:
+            job["error"] = "Some updates failed and can be retried by running this again: " + "; ".join(errors)
+    except Exception as exc:
+        job["error"] = str(exc)
+    finally:
+        job["done"] = True
+
+
 @router.post("/api/projects/{slug}/chapters/{chapter_num}/bible-sync")
 def sync_chapter_bible(slug: str, chapter_num: int) -> dict[str, Any]:
-    """Re-runs just the bible/timeline proposal step (the last two of the
-    finalize pipeline's 8 steps) against the chapter's current finalized
-    text, without touching the prose itself - for recovering proposals that
-    were lost to a failed/errored finalize job (e.g. the frontend used to
-    discard bible_proposals/timeline_proposals whenever a later pipeline
-    step, like outline sync, failed). As with the finalize pipeline, nothing
-    is written to the bible until the writer reviews and approves each
-    proposal via the returned lists."""
+    """Kicks off the bible/timeline/thread proposal recovery pass (the last
+    steps of the finalize pipeline) in a background thread and returns a
+    job_id immediately, so the UI can poll for progress instead of blocking
+    on what can now be a dozen+ serial LLM calls on a long-running project -
+    for recovering proposals that were lost to a failed/errored finalize job
+    (e.g. the frontend used to discard bible_proposals/timeline_proposals
+    whenever a later pipeline step, like outline sync, failed). As with the
+    finalize pipeline, nothing is written to the bible until the writer
+    reviews and approves each proposal via the job's returned lists."""
     bible = load_bible(slug)
-    ch = require_chapter(bible, chapter_num)
-    text = current_chapter_text(ch)
-    if not text:
-        raise HTTPException(404, "Chapter has no finalized text yet")
-    return {
-        "bible_proposals": bible_manager.propose_from_chapter(bible, chapter_num, text),
-        "timeline_proposals": timeline_extractor.propose_from_chapter(bible, chapter_num, text),
-    }
+    require_chapter(bible, chapter_num)
+
+    job_id = _bible_sync_jobs.create({
+        "bible_proposals": [],
+        "timeline_proposals": [],
+        "thread_proposals": [],
+        "resolve_proposals": [],
+        "step_index": 0,
+        "total_steps": len(_BIBLE_SYNC_STEPS),
+        "label": _BIBLE_SYNC_STEPS[0][1],
+    })
+    threading.Thread(target=_run_bible_sync_job, args=(job_id, slug, chapter_num), daemon=True).start()
+    return {"job_id": job_id}
+
+
+@router.get("/api/projects/{slug}/chapters/{chapter_num}/bible-sync/status/{job_id}")
+def bible_sync_status(slug: str, chapter_num: int, job_id: str) -> dict[str, Any]:
+    job = _bible_sync_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "No such job")
+    return job
 
 
 @router.post("/api/projects/{slug}/chapters/{chapter_num}/check-continuity")
+@with_bible_lock
 def check_continuity_chapter(slug: str, chapter_num: int) -> dict[str, Any]:
     """Re-checks an already-approved chapter against the CURRENT bible (which may
     have changed since this chapter was finalized, e.g. an earlier chapter was
@@ -402,11 +517,12 @@ def check_continuity_chapter(slug: str, chapter_num: int) -> dict[str, Any]:
 
     issues = editor.check_continuity(bible, chapter_num, text)
     issues += voice_checker.check(bible, chapter_num, text)
-    bible.upsert_chapter(chapter_num, needs_recheck=False, continuity_issues=issues)
+    bible.upsert_chapter(chapter_num, needs_recheck=False, needs_recheck_from=[], continuity_issues=issues)
     return {"issues": issues}
 
 
 @router.post("/api/projects/{slug}/chapters/{chapter_num}/fact-check")
+@with_bible_lock
 def fact_check_chapter(slug: str, chapter_num: int) -> dict[str, Any]:
     """Post-hoc real-world plausibility pass over a finalized chapter's prose -
     distinct from check-continuity above, which only checks internal bible
@@ -433,6 +549,7 @@ def fact_check_chapter(slug: str, chapter_num: int) -> dict[str, Any]:
 
 
 @router.post("/api/projects/{slug}/chapters/{chapter_num}/critique")
+@with_bible_lock
 def critique_chapter(slug: str, chapter_num: int) -> dict[str, Any]:
     """Developmental-editing pass over one chapter (pacing/stakes/craft) -
     distinct from check-continuity (correctness) and fact-check (real-world
@@ -464,6 +581,7 @@ class TranslateChapterRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/chapters/{chapter_num}/translate")
+@with_bible_lock
 def translate_chapter(slug: str, chapter_num: int, body: TranslateChapterRequest) -> dict[str, Any]:
     """Single-chapter final-pass translation - the one-at-a-time counterpart to
     the whole-book translate-book job below. Requires the chapter to be
@@ -499,8 +617,9 @@ def translate_chapter(slug: str, chapter_num: int, body: TranslateChapterRequest
     return {"translated": True}
 
 
+@with_bible_lock
 def _run_critique_book_job(job_id: str, slug: str) -> None:
-    job = _critique_book_jobs[job_id]
+    job = _critique_book_jobs.get(job_id)
     try:
         bible = load_bible(slug)
         chapters = [
@@ -551,11 +670,7 @@ def critique_book(slug: str) -> dict[str, Any]:
     if not any(ch.get("final") or current_chapter_text(ch) for ch in bible.data.get("chapters", [])):
         raise HTTPException(400, "No drafted chapters yet")
 
-    job_id = uuid.uuid4().hex
-    _critique_book_jobs[job_id] = {
-        "done": False, "error": None, "result": None,
-        "step_index": 0, "total_steps": 1, "label": "Starting...",
-    }
+    job_id = _critique_book_jobs.create({"step_index": 0, "total_steps": 1, "label": "Starting..."})
     threading.Thread(target=_run_critique_book_job, args=(job_id, slug), daemon=True).start()
     return {"job_id": job_id}
 
@@ -568,8 +683,80 @@ def critique_book_status(slug: str, job_id: str) -> dict[str, Any]:
     return job
 
 
+@with_bible_lock
+def _run_book_consistency_check_job(job_id: str, slug: str) -> None:
+    job = _book_consistency_jobs.get(job_id)
+    try:
+        bible = load_bible(slug)
+        chapters = [
+            ch for ch in bible.data.get("chapters", [])
+            if (ch.get("final") or current_chapter_text(ch))
+        ]
+        chapters.sort(key=lambda ch: ch["chapter_num"])
+        # total_steps counts one step per chapter for the continuity sweep,
+        # one step per chapter again for the voice-check pass, plus the final
+        # save pass - same determinate-progress shape as _run_critique_book_job.
+        job["total_steps"] = len(chapters) * 2 + 1
+        job["step_index"] = 0
+        job["label"] = "Sweeping chapters in book order"
+
+        chapter_payload = [
+            {"chapter_num": ch["chapter_num"], "text": ch.get("final") or current_chapter_text(ch)}
+            for ch in chapters
+        ]
+
+        def _on_batch(chapters_done: int, total_chapters: int) -> None:
+            job["step_index"] = chapters_done
+            job["label"] = "Sweeping chapters in book order"
+
+        def _on_voice_progress(chapters_done: int, total_chapters: int) -> None:
+            job["step_index"] = len(chapters) + chapters_done
+            job["label"] = "Checking narrative voice"
+
+        flags = continuity_checker.check_book(
+            bible, chapter_payload, on_batch=_on_batch,
+            voice_checker=voice_checker, on_voice_progress=_on_voice_progress,
+        )
+
+        job["step_index"] = len(chapters) * 2
+        job["label"] = "Saving flags"
+        bible.add_continuity_flags(flags)
+        job["step_index"] = job["total_steps"]
+        job["result"] = {"flags": flags}
+    except Exception as exc:
+        job["error"] = str(exc)
+    finally:
+        job["done"] = True
+
+
+@router.post("/api/projects/{slug}/book-consistency-check")
+def book_consistency_check(slug: str) -> dict[str, Any]:
+    """Whole-book continuity/consistency sweep: walks every drafted/finalized
+    chapter in book order against a rolling story-so-far summary AND the
+    characters/world/timeline briefs, distinct from consistency-check (scoped
+    to the fallout of one described change) and critique-book (craft/pacing,
+    not continuity). Runs as a background job, same job_id/poll pattern as
+    critique-book, since it's many chapters' worth of LLM calls."""
+    bible = load_bible(slug)
+    if not any(ch.get("final") or current_chapter_text(ch) for ch in bible.data.get("chapters", [])):
+        raise HTTPException(400, "No drafted chapters yet")
+
+    job_id = _book_consistency_jobs.create({"step_index": 0, "total_steps": 1, "label": "Starting..."})
+    threading.Thread(target=_run_book_consistency_check_job, args=(job_id, slug), daemon=True).start()
+    return {"job_id": job_id}
+
+
+@router.get("/api/projects/{slug}/book-consistency-check/status/{job_id}")
+def book_consistency_check_status(slug: str, job_id: str) -> dict[str, Any]:
+    job = _book_consistency_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "No such job")
+    return job
+
+
+@with_bible_lock
 def _run_translate_book_job(job_id: str, slug: str, language: str, retranslate: bool) -> None:
-    job = _translate_book_jobs[job_id]
+    job = _translate_book_jobs.get(job_id)
     translator = translators[language]
     try:
         bible = load_bible(slug)
@@ -634,11 +821,7 @@ def translate_book(slug: str, body: TranslateBookRequest) -> dict[str, Any]:
     if not any(ch.get("final") or current_chapter_text(ch) for ch in bible.data.get("chapters", [])):
         raise HTTPException(400, "No finalized chapters yet")
 
-    job_id = uuid.uuid4().hex
-    _translate_book_jobs[job_id] = {
-        "done": False, "error": None, "result": None,
-        "step_index": 0, "total_steps": 1, "label": "Starting...",
-    }
+    job_id = _translate_book_jobs.create({"step_index": 0, "total_steps": 1, "label": "Starting..."})
     threading.Thread(
         target=_run_translate_book_job, args=(job_id, slug, body.language, body.retranslate), daemon=True
     ).start()
@@ -651,12 +834,3 @@ def translate_book_status(slug: str, job_id: str) -> dict[str, Any]:
     if job is None:
         raise HTTPException(404, "No such job")
     return job
-
-
-@router.post("/api/projects/{slug}/critique-flags/{flag_id}/resolve")
-def resolve_critique_flag(slug: str, flag_id: int) -> dict[str, Any]:
-    """Dismisses a persisted critique flag from the Critique view - mirrors
-    resolve_continuity_flag in outline.py."""
-    bible = load_bible(slug)
-    bible.resolve_critique_flag(flag_id)
-    return {"ok": True}

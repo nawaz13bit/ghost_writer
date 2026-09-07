@@ -57,9 +57,12 @@ class AuthorAgent(Agent):
 
         characters_section = (
             "" if nonfiction
-            else f"Characters:\n{bible.characters_brief(names=cast if cast else None)}\n"
+            else f"Characters:\n{bible.characters_brief(names=cast if cast else None, unlock_chapter_num=chapter_num)}\n"
         )
         pov_line = "" if nonfiction else (f"POV character: {entry['pov']}" if entry.get('pov') else '')
+
+        planted_threads = "" if nonfiction else bible.planted_threads_brief(chapter_num)
+        threads_section = f"\nSetups to pay off in this chapter:\n{planted_threads}\n" if planted_threads else ""
 
         research_section = ""
         if research_notes:
@@ -91,6 +94,7 @@ Relevant world-building and continuity notes for this chapter:
 {continuity}
 {timeline_section}
 {neighbors_section}
+{threads_section}
 {research_section}
 Recap of earlier books in this series (if any):
 {bible.data.get("series_recap") or "(This is not part of a series.)"}
@@ -149,6 +153,9 @@ Write the full chapter prose now."""
             f"the book if written out of order - do not contradict):\n{neighbors}\n"
         ) if neighbors else ""
 
+        planted_threads = bible.planted_threads_brief(chapter_num)
+        threads_section = f"\nSetups to pay off in this chapter:\n{planted_threads}\n" if planted_threads else ""
+
         prior_scenes = sorted(
             (s for s in (entry.get("scenes") or []) if s["scene_num"] < scene_num and s.get("draft")),
             key=lambda s: s["scene_num"],
@@ -186,13 +193,14 @@ Write the full chapter prose now."""
 Premise: {bible.data['premise']}
 {engine_section}
 Characters:
-{bible.characters_brief(names=cast if cast else None)}
+{bible.characters_brief(names=cast if cast else None, unlock_chapter_num=chapter_num)}
 {act_section}
 Relevant world-building and continuity notes for this scene:
 {continuity}
 {location_section}
 {timeline_section}
 {neighbors_section}
+{threads_section}
 This is scene {scene_num} of Chapter {chapter_num}: "{entry['title']}".
 {f"POV character: {pov}" if pov else ''}
 {f"Emotional arc across this scene: {scene['emotional_state']}" if scene.get('emotional_state') else ''}{location_directive}

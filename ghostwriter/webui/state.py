@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ghostwriter.agents.bible_manager import BibleManagerAgent
+from ghostwriter.agents.blurb import BlurbAgent
 from ghostwriter.agents.book_critique import BookCritiqueAgent
 from ghostwriter.agents.character_builder import CharacterBuilderAgent
 from ghostwriter.agents.continuity_checker import ContinuityCheckerAgent
@@ -21,6 +22,7 @@ from ghostwriter.agents.fact_checker import FactCheckerAgent
 from ghostwriter.agents.history_compactor import HistoryCompactorAgent
 from ghostwriter.agents.pacing_checker import PacingCheckerAgent
 from ghostwriter.agents.stakes_checker import StakesCheckerAgent
+from ghostwriter.agents.thread_planner import ThreadPlannerAgent
 from ghostwriter.agents.timeline_extractor import TimelineExtractorAgent
 from ghostwriter.agents.translator import LANGUAGES, TranslatorAgent
 from ghostwriter.agents.outliner import OutlinerAgent
@@ -45,6 +47,7 @@ copy_editor = CopyEditorAgent(llm)
 voice_checker = VoiceCheckerAgent(llm)
 bible_manager = BibleManagerAgent(llm)
 timeline_extractor = TimelineExtractorAgent(llm)
+thread_planner = ThreadPlannerAgent(llm)
 reviser = ReviserAgent(llm)
 researcher = ResearcherAgent(llm, **cfg.get("research", {}))
 fact_checker = FactCheckerAgent(llm, **cfg.get("research", {}))
@@ -60,6 +63,7 @@ pacing_checker = PacingCheckerAgent(llm)
 stakes_checker = StakesCheckerAgent(llm)
 craft_checker = CraftCheckerAgent(llm)
 book_critique = BookCritiqueAgent(llm)
+blurb_agent = BlurbAgent(llm)
 translators: dict[str, TranslatorAgent] = {lang.key: TranslatorAgent(llm, lang) for lang in LANGUAGES}
 
 # -- editable agent prompts ---------------------------------------------------
@@ -77,6 +81,7 @@ AGENT_REGISTRY: dict[str, tuple[str, Any]] = {
     "voice_checker": ("Voice checker (finalize pass)", voice_checker),
     "bible_manager": ("Bible sync: character/faction/world (finalize pass)", bible_manager),
     "timeline_extractor": ("Timeline extractor: new plot events (finalize pass)", timeline_extractor),
+    "thread_planner": ("Thread planner: forward-looking planted-thread notes (finalize pass)", thread_planner),
     "character_builder": ("Character builder (new characters)", character_builder),
     "world_builder": ("World builder (new world entries)", world_builder),
     "researcher": ("Researcher (new notes)", researcher),
@@ -87,6 +92,7 @@ AGENT_REGISTRY: dict[str, tuple[str, Any]] = {
     "stakes_checker": ("Critique: stakes/tension checker (chapter-level)", stakes_checker),
     "craft_checker": ("Critique: craft checker (show-vs-tell/POV, chapter-level)", craft_checker),
     "book_critique": ("Critique: whole-book rollup", book_critique),
+    "blurb_agent": ("Back-cover blurb + query letter generator", blurb_agent),
     **{
         f"translator_{key}": (f"Translator: {agent.language.name} (final pass, native cultural persona)", agent)
         for key, agent in translators.items()

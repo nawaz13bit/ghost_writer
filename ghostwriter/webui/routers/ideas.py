@@ -10,7 +10,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ghostwriter.webui.deps import load_bible
+from ghostwriter.webui.deps import load_bible, with_bible_lock
+from ghostwriter.webui.state import reviser
 
 router = APIRouter(tags=["ideas"])
 
@@ -20,6 +21,7 @@ class NewIdeaRequest(BaseModel):
     notes: str = ""
     linked_kind: str | None = None
     linked_id: str | int | None = None
+    category: str | None = None
 
 
 class IdeaEditRequest(BaseModel):
@@ -27,6 +29,8 @@ class IdeaEditRequest(BaseModel):
     notes: str | None = None
     linked_kind: str | None = None
     linked_id: str | int | None = None
+    category: str | None = None
+    status: str | None = None
 
 
 class PromoteIdeaRequest(BaseModel):
@@ -36,15 +40,21 @@ class PromoteIdeaRequest(BaseModel):
     outline: str = ""
 
 
+class InstructionRequest(BaseModel):
+    instruction: str
+
+
 @router.post("/api/projects/{slug}/ideas")
+@with_bible_lock
 def create_idea(slug: str, req: NewIdeaRequest) -> dict[str, Any]:
     if not req.title.strip():
         raise HTTPException(400, "A title is required")
     bible = load_bible(slug)
-    return bible.add_idea(req.title.strip(), req.notes, req.linked_kind, req.linked_id)
+    return bible.add_idea(req.title.strip(), req.notes, req.linked_kind, req.linked_id, req.category)
 
 
 @router.post("/api/projects/{slug}/ideas/{idea_id}/edit")
+@with_bible_lock
 def edit_idea(slug: str, idea_id: int, req: IdeaEditRequest) -> dict[str, Any]:
     bible = load_bible(slug)
     # exclude_unset (not the old "drop None" filter) so an explicit null -
@@ -57,7 +67,28 @@ def edit_idea(slug: str, idea_id: int, req: IdeaEditRequest) -> dict[str, Any]:
         raise HTTPException(404, str(exc))
 
 
+@router.post("/api/projects/{slug}/ideas/{idea_id}/revise")
+@with_bible_lock
+def revise_idea(slug: str, idea_id: int, req: InstructionRequest) -> dict[str, Any]:
+    """AI-revises an idea's notes to address a given instruction (e.g. a
+    continuity flag saying this idea is now outdated/contradicted). Applied
+    directly rather than going through the diff/approve flow entities.py uses
+    - ideas have no revision history, so there's nothing to review against;
+    the writer can always follow up with a manual edit if the result needs
+    adjusting."""
+    bible = load_bible(slug)
+    idea = bible.get_idea(idea_id)
+    if idea is None:
+        raise HTTPException(404, f"No idea {idea_id}")
+    old_notes = idea.get("notes") or ""
+    new_notes = reviser.revise(
+        f"an idea-backlog entry titled {idea['title']!r}", old_notes or idea["title"], req.instruction
+    )
+    return bible.update_idea(idea_id, notes=new_notes)
+
+
 @router.delete("/api/projects/{slug}/ideas/{idea_id}")
+@with_bible_lock
 def delete_idea(slug: str, idea_id: int) -> dict[str, Any]:
     bible = load_bible(slug)
     try:
@@ -68,6 +99,7 @@ def delete_idea(slug: str, idea_id: int) -> dict[str, Any]:
 
 
 @router.post("/api/projects/{slug}/ideas/{idea_id}/promote")
+@with_bible_lock
 def promote_idea(slug: str, idea_id: int, req: PromoteIdeaRequest) -> dict[str, Any]:
     bible = load_bible(slug)
     try:

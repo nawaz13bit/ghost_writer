@@ -14,9 +14,13 @@ happens. Output only the revised chapter prose, no commentary, no markdown."""
 CONTINUITY_SYSTEM_PROMPT = """You are the Continuity Checker on a novel-writing
 team. Compare a chapter draft against established story-bible facts and flag
 concrete contradictions (names, physical descriptions, timeline, established
-rules of the world, prior events). Do not flag stylistic issues. Always
-respond with ONLY a JSON array of strings, each a specific contradiction found.
-Respond with an empty array [] if there are no contradictions."""
+rules of the world, prior events). You are also given the writer's open idea
+backlog (setups, planted threads, notes-to-self) - flag a chapter that clearly
+contradicts one of these ideas, or that was obviously the right place to pay
+one off but ignores it entirely. Do not flag stylistic issues, and do not flag
+an idea just because this chapter isn't its designated payoff chapter yet.
+Always respond with ONLY a JSON array of strings, each a specific contradiction
+or missed/ignored idea found. Respond with an empty array [] if there are none."""
 
 REWRITE_SYSTEM_PROMPT = """You are the Editor on a novel-writing team, doing a
 final continuity-repair pass. You are given a chapter and a list of specific
@@ -52,17 +56,21 @@ Revise this chapter for prose quality. Output only the revised chapter text."""
         continuity = continuity_context(
             bible, query=text[:1000], top_k=8, before_chapter=chapter_num, exclude_characters=cast,
         )
+        ideas_brief = bible.open_ideas_brief()
+        ideas_section = f"\nOpen ideas/setups the writer has noted (flag if contradicted or clearly ignored):\n{ideas_brief}\n" if ideas_brief else ""
+
         prompt = f"""Established story-bible facts that may be relevant:
 {continuity}
 
 Characters:
 {bible.characters_brief(names=cast if cast else None)}
-
+{ideas_section}
 --- CHAPTER {chapter_num} DRAFT ---
 {text}
 --- END DRAFT ---
 
-List any concrete contradictions with the established facts above.
+List any concrete contradictions with the established facts above, plus any
+open idea above that this chapter contradicts or clearly ignores.
 Respond with ONLY a JSON array of strings (empty array if none)."""
         result = self.ask_json(prompt)
         return result if isinstance(result, list) else []

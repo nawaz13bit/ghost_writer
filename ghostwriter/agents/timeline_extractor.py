@@ -43,15 +43,22 @@ class TimelineExtractorAgent(Agent):
     def propose_from_chapter(self, bible: StoryBible, chapter_num: int, text: str) -> list[dict]:
         """Returns a list of proposed new timeline events for the writer to
         review - does not touch the bible. Each item: {name, story_date,
-        description, characters, chapter_num}."""
-        prompt = f"""Existing character bible (for matching "characters" names):
-{bible.characters_brief()}
+        description, characters, chapter_num}.
 
-Existing world bible (for matching "locations" names):
-{bible.world_brief()}
+        The character/world/timeline reference dump is batched (see
+        Agent.ask_json_batched) instead of sent whole in one prompt, for the
+        same reason as bible_manager: on a long-running project it can grow
+        past the model's context window on its own. Unlike bible_manager's
+        facts, an event found in the chapter doesn't depend on which bible
+        entries happen to share its batch, so the *same* event is expected
+        to come back from every batch - proposals are deduped by name below
+        rather than merged/concatenated."""
+        entries = bible.characters_brief().split("\n") + bible.world_brief().split("\n") + bible.timeline_brief().split("\n")
 
-Existing timeline:
-{bible.timeline_brief()}
+        def build_prompt(bible_chunk: str) -> str:
+            return f"""Existing character/world/timeline reference (a portion of it, for
+matching "characters"/"locations" names and avoiding already-logged events):
+{bible_chunk}
 
 --- CHAPTER {chapter_num} ---
 {text}
@@ -60,14 +67,12 @@ Existing timeline:
 List any new plot-significant events established in this chapter. Respond
 with ONLY a JSON array like:
 [{{"name": "...", "story_date": "...", "description": "...", "characters": ["..."], "locations": ["..."]}}, ...]"""
-        events = self.ask_json(prompt)
-        if isinstance(events, dict):
-            events = [events]
-        if not isinstance(events, list):
-            return []
+
+        events = self.ask_json_batched(entries, build_prompt)
 
         known_characters = {c["name"].lower(): c["name"] for c in bible.data["characters"]}
         known_world = {w["name"].lower(): w["name"] for w in bible.data["world"]}
+        seen_names: set[str] = set()
         proposals = []
         for e in events:
             if not isinstance(e, dict):
@@ -78,6 +83,9 @@ with ONLY a JSON array like:
                 continue
             if not isinstance(description, str) or not description.strip():
                 continue
+            if name.strip().lower() in seen_names:
+                continue
+            seen_names.add(name.strip().lower())
 
             def _match(raw, known):
                 out = []

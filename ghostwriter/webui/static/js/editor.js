@@ -1,7 +1,7 @@
 // Canvas drawer editor: split-view revision editor, outline editor, story
 // engine editor, progress/continuity overview, character sections, universal
 // prompt routing, and the local LLM server status indicator.
-import { $, api, kindLabel, markTouched, persistTasks, pollDeterminateJob, pollFinalizeJob, pollStreamJob, setStatus, state, uiConfirm, uiPrompt, withInlineFeedback } from "./api.js";
+import { $, api, hideBusy, kindLabel, markTouched, persistTasks, pollDeterminateJob, pollDeterminateJobKeepErrors, pollFinalizeJob, pollStreamJob, setStatus, showBusy, state, uiConfirm, uiPrompt, withInlineFeedback } from "./api.js";
 import { refreshChapterMeta, renderManuscript, selectChapter } from "./manuscript.js";
 import { refreshBible, syncProjectToSeries } from "./projects.js";
 import { renderSidebar } from "./sidebar.js";
@@ -45,6 +45,14 @@ export function chapterStatusBadge(ch) {
   });
 }
 
+// Points the writer at the specific chapter(s) that triggered a needs_recheck
+// flag, instead of a bare "something changed" warning they'd have to guess at.
+export function recheckMessage(ch) {
+  const from = ch.needs_recheck_from || [];
+  const which = from.length ? `Chapter ${from.join(", ")}` : "an earlier chapter";
+  return `Flagged for recheck - ${which} changed since this was approved.`;
+}
+
 export function entityStatusBadge(entity) {
   const flags = (state.bible && state.bible.continuity_flags) || [];
   const hasOpenFlag = flags.some(f => f.target_name === entity.name);
@@ -54,6 +62,15 @@ export function entityStatusBadge(entity) {
     historyLen: (entity.history || []).length,
     hasOpenFlag,
   });
+}
+
+export function ideaStatusBadge(idea) {
+  const flags = (state.bible && state.bible.continuity_flags) || [];
+  const hasOpenFlag = flags.some(f => f.kind === "idea" && f.idea_id === idea.id);
+  if (hasOpenFlag) return { text: STATUS_LABELS["stale-flagged"], cls: "warn", key: "stale-flagged" };
+  if (idea.status === "resolved") return { text: "resolved", cls: "approved", key: "resolved" };
+  if (idea.status === "dropped") return { text: "dropped", cls: "", key: "dropped" };
+  return null;
 }
 
 export function noteName(n) { return n.name || n.topic; }
@@ -127,12 +144,14 @@ function ensureEntityHost() {
 }
 
 export function closeDrawer() {
-  if (entityHostActive) {
-    entityHostActive = false;
-    renderManuscript();
-  } else {
-    resetDrawerEmbed();
-  }
+  // renderManuscript() calls resetDrawerEmbed() itself and always leaves the
+  // manuscript pane in a correct state, so it's safe (and necessary) to call
+  // it unconditionally here - the previous entityHostActive-only branch left
+  // a chapter's inline editor merely detached (resetDrawerEmbed only) with
+  // no redraw, which went stale whenever the underlying data changed (e.g.
+  // an outline revision) while that editor was open.
+  entityHostActive = false;
+  renderManuscript();
   state.selection = null;
 }
 
@@ -188,6 +207,80 @@ export function setSelection(kind, id) {
 // Shows a styled in-app modal (instead of the browser's native confirm())
 // asking whether to save, discard, or cancel when navigating away from a
 // character with unsaved section edits. Resolves to "save"/"discard"/"cancel".
+// Bulk continuity-fix loops (fixAllContinuityFlags/fixAllChapterContinuityIssues)
+// call selectItem repeatedly while holding the click-blocking busy overlay up
+// for the whole loop. That overlay sits above the unsaved-changes modal
+// (z-index 1000 vs 300), so if selectItem ever tried to prompt mid-loop the
+// modal would render invisible and unclickable - an await on a click that can
+// never land, i.e. the "gets stuck forever" freeze. While this is set,
+// selectItem auto-saves dirty sections instead of prompting.
+let bulkAutoSaveMode = false;
+
+// Guards against a second bulk-fix loop starting while the first is still
+// mid-flight (fixAllContinuityFlags no longer pauses for a click, but a run
+// can still take a while - several sequential AI calls - so this stays
+// re-entrant-safe against a double click on "Fix all").
+let bulkFixRunning = false;
+
+// A bulk fix loop used to pause here after generating a pending entity/
+// chapter revision, waiting for the writer's own approve click. The writer
+// later asked for the opposite: "fix all" should save/finalize each fix as it
+// goes, with no click needed, so information isn't lost moving to the next
+// chapter - see autoApprove below. bulkFixWait/notifyBulkApproval are kept
+// as a no-op pair (notifyBulkApproval is still called by approveSelected on
+// every approve) in case a future caller wants to pause again; nothing
+// currently sets bulkFixWait, so cancelBulkFix's Emergency Stop hookup is
+// harmless when there's nothing to cancel.
+let bulkFixWait = null;
+
+function notifyBulkApproval(kind, id) {
+  if (bulkFixWait && bulkFixWait.kind === kind && String(bulkFixWait.id) === String(id)) {
+    const { resolve } = bulkFixWait;
+    bulkFixWait = null;
+    resolve(true);
+  }
+}
+
+// Called from Emergency Stop so a writer who wants to abandon an in-flight
+// bulk fix can do so even if some future caller is paused on a wait.
+export function cancelBulkFix() {
+  if (bulkFixWait) {
+    const { resolve } = bulkFixWait;
+    bulkFixWait = null;
+    resolve(false);
+  }
+}
+
+// Approves/finalizes whatever fix a bulk loop just produced for (kind, id)
+// without waiting for a click - mirrors the record/history-entry lookup
+// renderEditor does for the currently-selected item (normalizedRecord), but
+// callable for any (kind, id) the loop is currently processing regardless of
+// what selectItem has actually settled state.selection to yet.
+async function autoApprove(kind, id) {
+  let record, history;
+  if (kind === "chapter") {
+    record = getChapter(id) || { chapter_num: id };
+    history = record.history || [];
+    if (!history.length && record.draft) {
+      history = [{ id: 0, text: record.draft, source: "draft", instruction: null, created_at: record.created_at, synthesized: true }];
+    }
+  } else {
+    record = getEntity(kind, id) || { name: id };
+    const field = kind === "characters" || kind === "timeline" ? "description" : "content";
+    history = record.history || [];
+    if (!history.length && record[field]) {
+      history = [{ id: 0, text: record[field], source: "original", instruction: null, created_at: null, synthesized: true }];
+    }
+  }
+  const entry = history[history.length - 1];
+  if (!entry) return;
+  // approveSelected reads the id to approve off state.selection (not its
+  // record param), matching how the writer's real Approve click always fires
+  // from whatever's currently selected - point selection at this item first.
+  setSelection(kind, id);
+  await approveSelected(kind, record, entry);
+}
+
 function confirmUnsavedCharacterSections(name) {
   return new Promise((resolve) => {
     $("unsaved-modal-text").textContent =
@@ -210,9 +303,13 @@ export async function selectItem(kind, id) {
   if (!state.slug) return;
   if (state.selection && (state.selection.kind !== kind || state.selection.id !== id) &&
       hasUnsavedCharacterSections()) {
-    const choice = await confirmUnsavedCharacterSections(state.selection.id);
-    if (choice === "cancel") return;
-    if (choice === "save") await saveAllCharacterSections();
+    if (bulkAutoSaveMode) {
+      await saveAllCharacterSections();
+    } else {
+      const choice = await confirmUnsavedCharacterSections(state.selection.id);
+      if (choice === "cancel") return;
+      if (choice === "save") await saveAllCharacterSections();
+    }
   }
   if (kind === "chapter") {
     entityHostActive = false;
@@ -301,7 +398,7 @@ function renderActEditor(actName) {
     const ch = getChapter(o.chapter_num);
     if (!ch) continue;
     const issues = [...(ch.continuity_issues || [])];
-    if (ch.needs_recheck) issues.unshift("Flagged for recheck - an earlier chapter changed since this was approved.");
+    if (ch.needs_recheck) issues.unshift(recheckMessage(ch));
     if (!issues.length) continue;
     anyIssues = true;
     const block = document.createElement("div");
@@ -343,11 +440,35 @@ export function setPaneView(mode) {
 }
 
 // -- diff rendering -----------------------------------------------------------
+// Word-level diffs on prose tend to fragment into a confetti of tiny
+// alternating red/green spans whenever a rewritten passage shares short
+// common words (the/a/and/...) with the original. A short "equal" segment
+// sandwiched directly between two changes reads as noise, not context, so
+// it's rendered as a neutral "bridge" (shaded, not struck/underlined) that
+// visually joins the surrounding edits into one continuous region instead
+// of forcing the eye to jump segment by segment.
+function _isDiffBridge(segments, i) {
+  const seg = segments[i];
+  if (seg.op !== "equal") return false;
+  if (i === 0 || i === segments.length - 1) return false;
+  if (segments[i - 1].op === "equal" || segments[i + 1].op === "equal") return false;
+  const words = seg.text.trim().split(/\s+/).filter(Boolean);
+  return words.length > 0 && words.length <= 2;
+}
+
 function renderDiffInto(container, segments) {
   container.innerHTML = "";
-  for (const seg of segments) {
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
     if (seg.op === "equal") {
-      container.appendChild(document.createTextNode(seg.text));
+      if (_isDiffBridge(segments, i)) {
+        const bridge = document.createElement("span");
+        bridge.className = "diff-bridge";
+        bridge.textContent = seg.text;
+        container.appendChild(bridge);
+      } else {
+        container.appendChild(document.createTextNode(seg.text));
+      }
     } else if (seg.op === "insert") {
       const ins = document.createElement("ins");
       ins.textContent = seg.text;
@@ -548,7 +669,7 @@ export function renderEditor() {
   setPaneView(hasChanges ? "diff" : "edit");
 
   renderTimeline(history, selectedId, approved, record);
-  renderActions(kind, record, history, selectedEntry, approved, needsRecheck);
+  renderActions(kind, id, record, history, selectedEntry, approved, needsRecheck);
 
   const isNamedEntity = kind === "characters" || kind === "world" || kind === "research_notes";
   $("entity-rename-box").classList.toggle("hidden", !isNamedEntity);
@@ -556,9 +677,11 @@ export function renderEditor() {
 
   $("character-sections").classList.toggle("hidden", kind !== "characters");
   $("character-factions").classList.toggle("hidden", kind !== "characters");
+  $("character-reveals").classList.toggle("hidden", kind !== "characters");
   if (kind === "characters") {
     renderCharacterSections(record);
     renderCharacterFactions(record);
+    renderCharacterReveals(record);
   }
 
   const showsCategoryMove = kind === "world";
@@ -834,6 +957,127 @@ export async function saveCharacterFactions() {
   setStatus("Saved.");
 }
 
+// -- character reveals (plot-gated introductions) --------------------------
+function refreshRevealChapterOptions(selected) {
+  const sel = $("cr-chapter");
+  sel.innerHTML = "";
+  for (const entry of (state.bible.outline || []).slice().sort((a, b) => a.chapter_num - b.chapter_num)) {
+    const opt = document.createElement("option");
+    opt.value = entry.chapter_num;
+    opt.textContent = `Chapter ${entry.chapter_num}${entry.title ? ": " + entry.title : ""}`;
+    sel.appendChild(opt);
+  }
+  if (selected != null) sel.value = selected;
+}
+
+function renderCharacterReveals(record) {
+  refreshRevealChapterOptions();
+  const container = $("cr-list");
+  container.innerHTML = "";
+  const reveals = (record.reveals || []).slice().sort((a, b) => a.unlock_chapter_num - b.unlock_chapter_num);
+  if (!reveals.length) {
+    container.textContent = "No reveals yet - this character's full description is used from the start.";
+    return;
+  }
+  for (const reveal of reveals) {
+    const row = document.createElement("div");
+    row.className = "cs-field";
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "0.5rem";
+    const info = document.createElement("div");
+    info.style.flex = "1";
+    const chapterLabel = getOutlineEntry(reveal.unlock_chapter_num)?.title;
+    info.innerHTML = `<strong>Ch. ${reveal.unlock_chapter_num}${chapterLabel ? ": " + chapterLabel : ""}${reveal.section ? " (" + reveal.section + ")" : ""}</strong><br>${reveal.text}`;
+    const editBtn = document.createElement("button");
+    editBtn.textContent = "Edit";
+    editBtn.addEventListener("click", () => editCharacterReveal(record.name, reveal));
+    const delBtn = document.createElement("button");
+    delBtn.className = "danger";
+    delBtn.textContent = "Delete";
+    delBtn.addEventListener("click", () => deleteCharacterReveal(record.name, reveal.id));
+    row.appendChild(info);
+    row.appendChild(editBtn);
+    row.appendChild(delBtn);
+    container.appendChild(row);
+  }
+}
+
+export async function addCharacterReveal() {
+  const { kind, id: name } = state.selection;
+  if (kind !== "characters") return;
+  const text = $("cr-text").value.trim();
+  if (!text) {
+    setStatus("Reveal text is required.", true);
+    return;
+  }
+  const unlockChapterNum = parseInt($("cr-chapter").value, 10);
+  const section = $("cr-section").value.trim() || null;
+  setStatus("Adding reveal...");
+  await api(`/api/projects/${encodeURIComponent(state.slug)}/characters/${encodeURIComponent(name)}/reveals`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, unlock_chapter_num: unlockChapterNum, section }),
+  });
+  $("cr-text").value = "";
+  $("cr-section").value = "";
+  markTouched("characters", name, `Character: ${name} (reveal added)`);
+  await refreshBible();
+  renderSidebar();
+  renderEditor();
+  setStatus("Saved.");
+}
+
+export async function suggestCharacterReveal() {
+  const { kind, id: name } = state.selection;
+  if (kind !== "characters") return;
+  const unlockChapterNum = parseInt($("cr-chapter").value, 10);
+  if (!unlockChapterNum) {
+    setStatus("Pick a chapter for this reveal to unlock at first.", true);
+    return;
+  }
+  const section = $("cr-section").value.trim() || null;
+  const prompt = $("cr-suggest-prompt").value.trim();
+  setStatus("Asking AI to draft a reveal...");
+  const draft = await api(`/api/projects/${encodeURIComponent(state.slug)}/characters/${encodeURIComponent(name)}/reveals/suggest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ unlock_chapter_num: unlockChapterNum, section, prompt }),
+  });
+  $("cr-text").value = draft.text || "";
+  if (draft.section) $("cr-section").value = draft.section;
+  setStatus("Draft ready - review and edit before adding.");
+}
+
+async function editCharacterReveal(name, reveal) {
+  const text = await uiPrompt("Edit reveal text:", reveal.text);
+  if (text === null) return;
+  setStatus("Saving reveal...");
+  await api(`/api/projects/${encodeURIComponent(state.slug)}/characters/${encodeURIComponent(name)}/reveals/${reveal.id}/edit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: text.trim() }),
+  });
+  markTouched("characters", name, `Character: ${name} (reveal edited)`);
+  await refreshBible();
+  renderSidebar();
+  renderEditor();
+  setStatus("Saved.");
+}
+
+async function deleteCharacterReveal(name, revealId) {
+  if (!(await uiConfirm("Delete this reveal? This cannot be undone."))) return;
+  setStatus("Deleting reveal...");
+  await api(`/api/projects/${encodeURIComponent(state.slug)}/characters/${encodeURIComponent(name)}/reveals/${revealId}`, {
+    method: "DELETE",
+  });
+  markTouched("characters", name, `Character: ${name} (reveal deleted)`);
+  await refreshBible();
+  renderSidebar();
+  renderEditor();
+  setStatus("Deleted.");
+}
+
 function renderTimelineConsequence(record) {
   const dl = $("tc-character-options");
   dl.innerHTML = "";
@@ -946,12 +1190,12 @@ export async function draftMissingCharacterSections() {
 // rather than left alone when non-empty. Nothing is saved until the writer
 // reviews the (now-dirty) textarea and clicks Save, same review gate as
 // every other section edit.
-async function resyncCharacterSections(name, newFacts) {
+async function resyncCharacterSections(name, newFacts, chapterNum) {
   setStatus(`Checking ${name}'s sections against a new chapter fact...`);
   const result = await api(`/api/projects/${encodeURIComponent(state.slug)}/characters/${encodeURIComponent(name)}/sections/resync`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ new_facts: newFacts }),
+    body: JSON.stringify({ new_facts: newFacts, chapter_num: chapterNum ?? null }),
   });
   const drafted = result.sections || {};
   if (!Object.keys(drafted).length) {
@@ -995,7 +1239,7 @@ function renderTimeline(history, selectedId, approved, record) {
   }
 }
 
-function renderActions(kind, record, history, selectedEntry, approved, needsRecheck) {
+function renderActions(kind, id, record, history, selectedEntry, approved, needsRecheck) {
   const primary = $("editor-actions");
   const overflow = $("editor-overflow-menu");
   primary.innerHTML = "";
@@ -1015,6 +1259,8 @@ function renderActions(kind, record, history, selectedEntry, approved, needsRech
   if (kind === "chapter" && !history.length) {
     addBtn(primary, "Draft chapter", () => draftChapter(record.chapter_num), { primary: true });
     addBtn(overflow, "Edit outline summary", () => selectItem("outline", record.chapter_num));
+    addBtn(overflow, "Consistency check", () => checkConsistencyForItem("outline", id, `Chapter ${id}`))
+      .title = "Check this chapter's storyline/outline against the rest of the bible.";
     $("editor-overflow-wrap").classList.remove("hidden");
     return;
   }
@@ -1040,6 +1286,13 @@ function renderActions(kind, record, history, selectedEntry, approved, needsRech
         .title = "Translates this chapter's finalized text into the language selected under Settings > Translation";
     }
     addBtn(overflow, "Delete draft", () => deleteChapter(record.chapter_num));
+  }
+  if (kind === "chapter" || kind === "characters" || kind === "world" || kind === "research_notes" || kind === "timeline") {
+    const label = kind === "chapter" ? `Chapter ${id}` : (record.name || record.topic || id);
+    addBtn(overflow, "Consistency check", () => checkConsistencyForItem(kind === "chapter" ? "outline" : kind, id, label))
+      .title = kind === "characters"
+        ? "Check this character - including its sections and reveals - against the rest of the bible."
+        : "Check this item against the rest of the bible.";
   }
   if (kind === "characters" || kind === "world" || kind === "research_notes" || kind === "timeline") {
     addBtn(overflow, "Delete", () => deleteEntity(kind, record.name || record.topic));
@@ -1115,6 +1368,13 @@ export async function reviseWithInstruction() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ instruction }),
     });
+    // A revised entity sits as a pending history entry until something calls
+    // approveSelected on it - either the writer's own Finalize click, or (for
+    // the bulk continuity-fix loop, fixAllContinuityFlags -> dispatchUniversalTask
+    // -> here) autoApprove immediately after this call, since check_book()
+    // only ever reads the canonical/approved text and an unreviewed fix would
+    // just get re-flagged forever. The writer asked for fixes to be saved
+    // automatically rather than paused for a click (see autoApprove).
   }
   await refreshBible();
   state.selectedHistoryId = null;
@@ -1167,7 +1427,7 @@ export async function saveManualEdit() {
   renderEditor();
   if (kind === "chapter") refreshChapterMeta(id);
   markTouched(kind, id, kind === "chapter" ? `Chapter ${id}` : `${kindLabel(kind)}: ${id}`);
-  const queued = finalizeJob && queueBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals);
+  const queued = finalizeJob && queueBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals, finalizeJob.thread_proposals, finalizeJob.resolve_proposals);
   if (queued) {
     const first = state.universalQueue[0];
     const errNote = finalizeJob.error ? ` (finalize hit an error partway through: ${finalizeJob.error}, but earlier-step updates are still queued below)` : "";
@@ -1183,6 +1443,12 @@ export async function saveManualEdit() {
     setStatus(`${kind === "chapter" ? "Saved and finalized." : "Saved."}${compactionNote(revision)}`);
   }
 }
+
+// Set by integrateIdeaIntoChapter right before its revise call; consumed by
+// approveSelected once the writer actually approves that chapter's revision
+// diff - the idea is only "implemented" (and cleared off the open backlog)
+// once the integrated prose is accepted, not merely drafted for review.
+let pendingIdeaIntegration = null;
 
 async function approveSelected(kind, record, selectedEntry) {
   const { id } = state.selection;
@@ -1225,11 +1491,24 @@ async function approveSelected(kind, record, selectedEntry) {
   renderEditor();
   if (kind === "chapter") refreshChapterMeta(id);
   markTouched(kind, id, kind === "chapter" ? `Chapter ${id} (approved)` : `${kindLabel(kind)}: ${id} (approved)`);
-  const queued = finalizeJob && queueBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals);
+  let integratedIdeaNote = "";
+  if (kind === "chapter" && pendingIdeaIntegration && pendingIdeaIntegration.chapterNum === id) {
+    const { ideaId, ideaTitle } = pendingIdeaIntegration;
+    pendingIdeaIntegration = null;
+    await api(`/api/projects/${encodeURIComponent(state.slug)}/ideas/${ideaId}/edit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "resolved" }),
+    });
+    await refreshBible();
+    renderSidebar();
+    integratedIdeaNote = ` Idea "${ideaTitle}" marked resolved.`;
+  }
+  const queued = finalizeJob && queueBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals, finalizeJob.thread_proposals, finalizeJob.resolve_proposals);
   if (queued) {
     const first = state.universalQueue[0];
     const errNote = finalizeJob.error ? ` (finalize hit an error partway through: ${finalizeJob.error}, but earlier-step updates are still queued below)` : "";
-    setStatus(`Finalized. Found ${state.universalQueue.length} update${state.universalQueue.length === 1 ? "" : "s"} to review - starting with ${describeUniversalTask(first)}.${errNote}`, !!finalizeJob.error);
+    setStatus(`Finalized. Found ${state.universalQueue.length} update${state.universalQueue.length === 1 ? "" : "s"} to review - starting with ${describeUniversalTask(first)}.${errNote}${integratedIdeaNote}`, !!finalizeJob.error);
     try {
       await dispatchUniversalTask(first);
     } finally {
@@ -1238,8 +1517,12 @@ async function approveSelected(kind, record, selectedEntry) {
   } else if (finalizeJob && finalizeJob.error) {
     setStatus(`Finalize hit an error: ${finalizeJob.error}`, true);
   } else {
-    setStatus("Finalized.");
+    setStatus(`Finalized.${integratedIdeaNote}`);
   }
+  // Fired last, after every other await in this function has settled, so a
+  // resumed bulk-fix iteration (which navigates the pane via selectItem) can't
+  // interleave with work approveSelected itself still has in flight.
+  notifyBulkApproval(kind, id);
 }
 
 async function deleteEntity(kind, name) {
@@ -1316,19 +1599,26 @@ export async function fixContinuityIssues(chapterNum) {
 // all). Nothing is written to the bible until each proposal is reviewed.
 export async function syncChapterBible(chapterNum) {
   setStatus(`Re-checking Chapter ${chapterNum} for bible/timeline updates...`);
-  const { bible_proposals, timeline_proposals } = await api(
+  const { job_id } = await api(
     `/api/projects/${encodeURIComponent(state.slug)}/chapters/${chapterNum}/bible-sync`,
     { method: "POST" }
   );
-  const queued = queueBibleProposals(bible_proposals, chapterNum, timeline_proposals);
+  const job = await pollDeterminateJobKeepErrors(
+    `/api/projects/${encodeURIComponent(state.slug)}/chapters/${chapterNum}/bible-sync/status/${job_id}`
+  );
+  const { bible_proposals, timeline_proposals, thread_proposals, resolve_proposals, error } = job;
+  const queued = queueBibleProposals(bible_proposals, chapterNum, timeline_proposals, thread_proposals, resolve_proposals);
   if (queued) {
     const first = state.universalQueue[0];
-    setStatus(`Found ${state.universalQueue.length} update${state.universalQueue.length === 1 ? "" : "s"} to review - starting with ${describeUniversalTask(first)}.`);
+    const errNote = error ? ` (hit an error partway through: ${error}, but earlier-step updates are still queued below)` : "";
+    setStatus(`Found ${state.universalQueue.length} update${state.universalQueue.length === 1 ? "" : "s"} to review - starting with ${describeUniversalTask(first)}.${errNote}`, !!error);
     try {
       await dispatchUniversalTask(first);
     } finally {
       updateUniversalQueueBar();
     }
+  } else if (error) {
+    setStatus(`Bible/timeline re-check failed: ${error}`, true);
   } else {
     setStatus("No bible/timeline updates found.");
   }
@@ -1370,6 +1660,229 @@ export async function critiqueBook() {
   renderEditor();
   const flags = (job.result && job.result.flags) || [];
   setStatus(flags.length ? `Whole-book critique found ${flags.length} issue${flags.length === 1 ? "" : "s"} - see Critique view.` : "Whole-book critique found no issues.");
+}
+
+// Whole-book continuity/consistency sweep: chapters in book order against a
+// rolling story-so-far summary plus the characters/world/timeline briefs,
+// server-side background job (many LLM calls), polled like critiqueBook.
+// On a clean sweep (no flags), auto-finalizes any open chapters - mirrors
+// finalizeOpenChapters via the real /approve pipeline so bible/outline/
+// timeline/thread sync fire as normal side effects. On a dirty sweep, fixes
+// everything it found once and moves on (no re-check loop afterward), same
+// "fix once" contract as fixAllOutstandingContinuity's sub-steps.
+export async function checkBookConsistency() {
+  if (!state.slug) return;
+  setStatus("Starting whole-book consistency sweep...");
+  const { job_id } = await api(`/api/projects/${encodeURIComponent(state.slug)}/book-consistency-check`, { method: "POST" });
+  const job = await pollDeterminateJob(
+    `/api/projects/${encodeURIComponent(state.slug)}/book-consistency-check/status/${job_id}`
+  );
+  await refreshBible();
+  renderSidebar();
+  renderEditor();
+  const flags = (job.result && job.result.flags) || [];
+  if (!flags.length) {
+    setStatus("Whole-book sweep found no issues - finalizing any open chapters...");
+    await finalizeOpenChapters();
+    return;
+  }
+  setStatus(`Whole-book sweep found ${flags.length} issue${flags.length === 1 ? "" : "s"} - fixing...`);
+  await fixAllContinuityFlags();
+  await fixAllChapterContinuityIssues();
+}
+
+// Bulk counterpart to the Continuity dashboard's per-flag "Fix" button -
+// same dispatch-then-resolve sequence, just looped over every persisted
+// flag instead of one at a time.
+// A task counts as "approvable" when dispatchUniversalTask routes it through
+// reviseWithInstruction, which leaves a pending entity/chapter revision that
+// only becomes canonical once the writer clicks Approve (see approveSelected /
+// notifyBulkApproval). Returns the {kind, id} approveSelected will report, or
+// null if this task type has no approval gate to wait on (e.g. revise_idea).
+function approvalTargetForTask(task) {
+  switch (task.action) {
+    case "revise_character": return { kind: "characters", id: task.target_name };
+    case "revise_world": return { kind: "world", id: task.target_name };
+    case "revise_note": return { kind: "research_notes", id: task.target_name };
+    case "revise_timeline_event": return { kind: "timeline", id: task.target_name };
+    case "revise_chapter": return { kind: "chapter", id: task.chapter_num };
+    default: return null;
+  }
+}
+
+export async function fixAllContinuityFlags() {
+  if (bulkFixRunning) {
+    setStatus("A bulk fix is already running - hit Emergency Stop to abandon it.", true);
+    return;
+  }
+  const flags = (state.bible.continuity_flags || []).slice();
+  if (!flags.length) { setStatus("No continuity flags to fix."); return; }
+  // dispatchUniversalTask navigates the editor pane to whatever it's fixing
+  // (selectItem on a character/world/chapter/etc.), which tears down this
+  // Continuity view out from under the writer for the whole loop - if they
+  // were watching this tab, restore it after every item so progress is
+  // actually visible instead of looking like the button did nothing.
+  const watchingContinuity = state.selection && state.selection.kind === "overview" && state.selection.id === "continuity";
+  bulkFixRunning = true;
+  bulkAutoSaveMode = true;
+  try {
+    for (let i = 0; i < flags.length; i++) {
+      const flag = flags[i];
+      setStatus(`Fixing continuity flag ${i + 1}/${flags.length} with AI: "${flag.issue}"...`);
+      // Hold the click-blocking busy overlay up only while an AI/API call is
+      // actually in flight - otherwise a click landing in a gap between calls
+      // could fire a second AI call on the same shared state.selection/
+      // #instruction this loop is driving. It must come back DOWN below,
+      // before waiting on the writer's Approve click, or the overlay would
+      // block that click and deadlock the whole loop (see
+      // project_ghostwriter_fix_everything_deadlock).
+      showBusy();
+      try {
+        const task = continuityFlagToTask(flag);
+        await dispatchUniversalTask(task);
+        const approvalTarget = approvalTargetForTask(task);
+        if (approvalTarget) {
+          if (approvalTarget.id == null) {
+            // A task type that's normally approvable came back with nothing to
+            // key the save on (e.g. a drafted-chapter flag missing chapter_num).
+            // Surface this as a failure for THIS flag rather than silently
+            // skipping the save.
+            throw new Error("could not identify the pending revision to save");
+          }
+          // The writer no longer wants a manual approve click here: save/
+          // finalize the fix immediately so the information isn't lost moving
+          // to the next flag, then re-check below via resolveContinuityFlag.
+          await autoApprove(approvalTarget.kind, approvalTarget.id);
+          // Approving a chapter revision can itself queue follow-on bible/
+          // timeline proposals (approveSelected -> queueBibleProposals) and
+          // navigate the pane to the first one. Those are a different kind of
+          // approval (new canon facts, not "did the fix work") and stay
+          // review-gated - stop the batch here and let the writer work the
+          // queue rather than auto-accepting them too.
+          if (state.universalQueue.length > state.universalQueueIndex) {
+            const queuedCount = state.universalQueue.length - state.universalQueueIndex;
+            const remainingNow = flags.length - (i + 1);
+            renderOverview("continuity");
+            setStatus(`Fixed and saved - that also produced ${queuedCount} bible/timeline proposal${queuedCount === 1 ? "" : "s"} to review` +
+              (remainingNow ? ` (${remainingNow} more flag${remainingNow === 1 ? "" : "s"} left in this batch - re-run "Fix all" after reviewing).` : "."));
+            return;
+          }
+        }
+        await resolveContinuityFlag(flag.id);
+      } catch (err) {
+        setStatus(`Failed to fix "${flag.issue}": ${err.message || err}`, true);
+      } finally {
+        hideBusy();
+      }
+      if (watchingContinuity) renderOverview("continuity");
+    }
+  } finally {
+    bulkAutoSaveMode = false;
+    bulkFixRunning = false;
+  }
+  renderOverview("continuity");
+  const remaining = (state.bible.continuity_flags || []).length;
+  setStatus(remaining
+    ? `Fixed what it could - ${remaining} flag${remaining === 1 ? "" : "s"} still remain.`
+    : "All continuity flags fixed.");
+}
+
+// Bulk counterpart to each flagged chapter's own "Fix with AI" button (for
+// continuity_issues from that chapter's own recheck, as opposed to the
+// cross-cutting continuity_flags list above).
+export async function fixAllChapterContinuityIssues() {
+  const flagged = (state.bible.chapters || []).filter(c => (c.continuity_issues || []).length);
+  if (!flagged.length) { setStatus("No per-chapter continuity issues to fix."); return; }
+  // Same view-hijack problem as fixAllContinuityFlags: fixContinuityIssues
+  // navigates the editor pane to each chapter in turn, so restore Continuity
+  // after every chapter if that's what the writer was watching.
+  const watchingContinuity = state.selection && state.selection.kind === "overview" && state.selection.id === "continuity";
+  showBusy();
+  bulkAutoSaveMode = true;
+  try {
+    for (let i = 0; i < flagged.length; i++) {
+      const c = flagged[i];
+      setStatus(`Fixing continuity issues in chapter ${i + 1}/${flagged.length} (Chapter ${c.chapter_num})...`);
+      try {
+        await fixContinuityIssues(c.chapter_num);
+        // fixContinuityIssues re-runs the chapter's own recheck; if that came
+        // back clean, save/finalize the fix right away so it isn't lost when
+        // the loop moves to the next chapter. If issues remain, per the
+        // writer's instruction: leave it flagged and move on - no retry.
+        const refreshed = getChapter(c.chapter_num);
+        if (refreshed && !(refreshed.continuity_issues || []).length) {
+          await autoApprove("chapter", c.chapter_num);
+        }
+      } catch (err) {
+        setStatus(`Failed to fix Chapter ${c.chapter_num}: ${err.message || err}`, true);
+      }
+      if (watchingContinuity) renderOverview("continuity");
+    }
+  } finally {
+    bulkAutoSaveMode = false;
+    hideBusy();
+  }
+  renderOverview("continuity");
+}
+
+// Chapters that are drafted but never finalized, and currently carry no
+// continuity_issues, get auto-saved/finalized as part of the whole-book
+// "make everything green" pass - the writer doesn't want to click Approve
+// per chapter, just wants nothing lost moving to the next one. Deliberately
+// does NOT stop the loop when a finalize queues bible/timeline/thread
+// proposals (unlike fixAllContinuityFlags): those stay queued for later
+// review, but skipping ahead to the next open chapter still preserves more
+// information than halting the whole pass on the first one.
+export async function finalizeOpenChapters() {
+  const open = (state.bible.chapters || []).filter(c =>
+    !c.approved && (c.draft || (c.history || []).length) && !(c.continuity_issues || []).length
+  );
+  if (!open.length) { setStatus("No open chapters to finalize."); return; }
+  const watchingContinuity = state.selection && state.selection.kind === "overview" && state.selection.id === "continuity";
+  showBusy();
+  bulkAutoSaveMode = true;
+  try {
+    for (let i = 0; i < open.length; i++) {
+      const c = open[i];
+      setStatus(`Finalizing chapter ${i + 1}/${open.length} (Chapter ${c.chapter_num})...`);
+      try {
+        await autoApprove("chapter", c.chapter_num);
+      } catch (err) {
+        setStatus(`Failed to finalize Chapter ${c.chapter_num}: ${err.message || err}`, true);
+      }
+      if (watchingContinuity) renderOverview("continuity");
+    }
+  } finally {
+    bulkAutoSaveMode = false;
+    hideBusy();
+  }
+  renderOverview("continuity");
+}
+
+// The Continuity page's "make everything green" button: runs the whole-book
+// sweep, fixes every flag and every flagged chapter it turns up, finalizes
+// any chapter left open with nothing wrong with it, then re-sweeps once so
+// the dashboard reflects what (if anything) is left - an LLM fix isn't
+// guaranteed correct, so this is a best-effort pass, not a guarantee of zero
+// remaining issues. Critique is deliberately NOT run here - the writer wants
+// it as a separate, manual step once chapters are checked/fixed/finalized.
+export async function fixAllOutstandingContinuity() {
+  if (!state.slug) return;
+  showBusy();
+  try {
+    await fixAllContinuityFlags();
+    await fixAllChapterContinuityIssues();
+    await finalizeOpenChapters();
+  } finally {
+    hideBusy();
+  }
+  const remainingFlags = (state.bible.continuity_flags || []).length;
+  const remainingChapters = (state.bible.chapters || []).filter(c => (c.continuity_issues || []).length).length;
+  setStatus(
+    remainingFlags || remainingChapters
+      ? `Fixed what it could - ${remainingFlags} flag${remainingFlags === 1 ? "" : "s"} and ${remainingChapters} chapter${remainingChapters === 1 ? "" : "s"} still need attention.`
+      : "All outstanding continuity findings fixed and open chapters finalized."
+  );
 }
 
 // -- translation (final pass) ----------------------------------------------
@@ -1450,6 +1963,7 @@ function renderOutlineEditor(chapterNum) {
   $("oe-act").value = entry.act || "";
   $("oe-summary").value = entry.summary || "";
   $("oe-characters").value = (entry.characters || []).join(", ");
+  $("oe-world-refs").value = (entry.world_refs || []).join(", ");
   $("oe-outline").value = entry.outline || "";
 
   const actions = $("editor-actions");
@@ -1466,6 +1980,8 @@ function renderOutlineEditor(chapterNum) {
   };
   addBtn("Save", () => saveOutlineEntry(chapterNum), { primary: true });
   addBtn("Regenerate with AI", () => regenerateOutlineEntry(chapterNum));
+  addBtn("Consistency check", () => checkConsistencyForItem("outline", chapterNum, `Chapter ${chapterNum}`))
+    .title = "Check this chapter's storyline/outline (and drafted narrative, if any) against the rest of the bible.";
   addBtn("Delete", () => deleteOutlineEntry(chapterNum));
   addBtn("Back to draft", () => selectItem("chapter", chapterNum));
 
@@ -1796,11 +2312,12 @@ async function saveOutlineEntry(chapterNum) {
   const summary = $("oe-summary").value.trim();
   const outline = $("oe-outline").value.trim();
   const characters = $("oe-characters").value.split(",").map(s => s.trim()).filter(Boolean);
+  const world_refs = $("oe-world-refs").value.split(",").map(s => s.trim()).filter(Boolean);
   setStatus("Saving outline entry...");
   await api(`/api/projects/${encodeURIComponent(state.slug)}/outline/${chapterNum}/edit`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, act, summary, outline, characters }),
+    body: JSON.stringify({ title, act, summary, outline, characters, world_refs }),
   });
   await refreshBible();
   renderSidebar();
@@ -1932,6 +2449,59 @@ export function openPromoteIdeaModal(idea) {
 }
 
 export function closeOutlineModal() { promotingIdea = null; $("outline-modal-backdrop").classList.add("hidden"); }
+
+// -- integrate idea into chapter ------------------------------------------
+let integratingIdea = null;
+
+export function openIntegrateIdeaModal(idea) {
+  if (!state.slug) { setStatus("Select a project first.", true); return; }
+  const drafted = (state.bible.chapters || [])
+    .filter((c) => c.draft || (c.history && c.history.length))
+    .slice()
+    .sort((a, b) => a.chapter_num - b.chapter_num);
+  if (!drafted.length) {
+    setStatus("No drafted chapters to integrate this idea into yet.", true);
+    return;
+  }
+  integratingIdea = idea;
+  $("integrate-idea-modal-title").textContent = `Integrate Idea: ${idea.title}`;
+  const sel = $("ii-chapter");
+  sel.innerHTML = "";
+  for (const ch of drafted) {
+    const opt = document.createElement("option");
+    opt.value = ch.chapter_num;
+    opt.textContent = `Chapter ${ch.chapter_num}${ch.title ? ": " + ch.title : ""}`;
+    sel.appendChild(opt);
+  }
+  $("ii-instruction").value = `Weave in this idea: ${idea.title}${idea.notes ? " - " + idea.notes : ""}`;
+  $("integrate-idea-modal-backdrop").classList.remove("hidden");
+}
+
+export function closeIntegrateIdeaModal() { integratingIdea = null; $("integrate-idea-modal-backdrop").classList.add("hidden"); }
+
+export async function integrateIdeaIntoChapter() {
+  const idea = integratingIdea;
+  const chapterNum = parseInt($("ii-chapter").value, 10);
+  const instruction = $("ii-instruction").value.trim();
+  if (!idea || !chapterNum || !instruction) return;
+  closeIntegrateIdeaModal();
+  setStatus(`Revising Chapter ${chapterNum} to integrate "${idea.title}"...`);
+  const { job_id } = await api(
+    `/api/projects/${encodeURIComponent(state.slug)}/chapters/${chapterNum}/revise`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instruction }) }
+  );
+  await pollStreamJob(
+    `/api/projects/${encodeURIComponent(state.slug)}/chapters/${chapterNum}/revise/status/${job_id}`,
+    `Integrating idea into Chapter ${chapterNum}`
+  );
+  pendingIdeaIntegration = { chapterNum, ideaId: idea.id, ideaTitle: idea.title };
+  await refreshBible();
+  renderSidebar();
+  selectChapter(chapterNum);
+  refreshChapterMeta(chapterNum);
+  markTouched("chapter", chapterNum, `Chapter ${chapterNum}`);
+  setStatus(`Drafted a revision weaving in "${idea.title}" - review the diff below and approve it to keep the change (the idea will then be marked resolved).`);
+}
 
 export async function suggestOutlineEntry() {
   const chapterNum = parseInt($("oo-chapter-num").value, 10);
@@ -2076,6 +2646,7 @@ export function openIdeaModal(idea = null) {
   $("idea-title").value = idea ? idea.title : "";
   $("idea-notes").value = idea ? (idea.notes || "") : "";
   $("idea-relates-search").value = "";
+  $("idea-is-thread").checked = idea ? idea.category === "planted_thread" : false;
   refreshIdeaRelatesToOptions(idea ? idea.linked_kind : null, idea ? idea.linked_id : null);
   $("idea-modal-backdrop").classList.remove("hidden");
 }
@@ -2095,6 +2666,7 @@ export async function saveIdea() {
   const relatesTo = $("idea-relates-to").value;
   const [linkedKind, linkedIdRaw] = relatesTo ? relatesTo.split("|") : [null, null];
   const linkedId = linkedKind === "outline" && linkedIdRaw != null ? parseInt(linkedIdRaw, 10) : linkedIdRaw;
+  const category = $("idea-is-thread").checked ? "planted_thread" : null;
   const ideaId = editingIdeaId;
   closeIdeaModal();
   setStatus(ideaId ? "Saving idea..." : "Adding idea...");
@@ -2102,13 +2674,13 @@ export async function saveIdea() {
     await api(`/api/projects/${encodeURIComponent(state.slug)}/ideas/${ideaId}/edit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, notes, linked_kind: linkedKind, linked_id: linkedId }),
+      body: JSON.stringify({ title, notes, linked_kind: linkedKind, linked_id: linkedId, category }),
     });
   } else {
     await api(`/api/projects/${encodeURIComponent(state.slug)}/ideas`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, notes, linked_kind: linkedKind, linked_id: linkedId }),
+      body: JSON.stringify({ title, notes, linked_kind: linkedKind, linked_id: linkedId, category }),
     });
   }
   await refreshBible();
@@ -2131,6 +2703,7 @@ function renderEngineEditor() {
   $("ov-chapter-words").value = b.chapter_target_words || "";
   $("ov-author-name").value = b.author_name || "";
   $("ov-blurb").value = b.blurb || "";
+  $("ov-query-letter").value = b.query_letter || "";
   $("ov-copyright").value = b.copyright_text || "";
   $("ov-foreword").value = b.foreword || "";
   $("ov-acknowledgments").value = b.acknowledgments || "";
@@ -2170,6 +2743,14 @@ export async function reviseEngine() {
   setStatus("Drafted - review and click Save to keep it.");
 }
 
+export async function generateBlurb() {
+  setStatus("Asking AI to draft a blurb and query letter...");
+  const result = await api(`/api/projects/${encodeURIComponent(state.slug)}/generate-blurb`, { method: "POST" });
+  $("ov-blurb").value = result.blurb || "";
+  $("ov-query-letter").value = result.query_letter || "";
+  setStatus("Drafted - review and click Save to keep it.");
+}
+
 async function saveEngine() {
   const premise = $("ov-premise").value.trim();
   const tone = $("ov-tone").value.trim();
@@ -2183,6 +2764,7 @@ async function saveEngine() {
   const chapter_target_words = chapterWordsRaw ? parseInt(chapterWordsRaw, 10) : null;
   const author_name = $("ov-author-name").value.trim();
   const blurb = $("ov-blurb").value.trim();
+  const query_letter = $("ov-query-letter").value.trim();
   const copyright_text = $("ov-copyright").value.trim();
   const foreword = $("ov-foreword").value.trim();
   const acknowledgments = $("ov-acknowledgments").value.trim();
@@ -2193,7 +2775,7 @@ async function saveEngine() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       premise, tone, narrative_voice, narrative_engine, themes, real_world_setting, total_word_target, chapter_target_words,
-      author_name, blurb, copyright_text, foreword, acknowledgments, about_author,
+      author_name, blurb, query_letter, copyright_text, foreword, acknowledgments, about_author,
     }),
   });
   await refreshBible();
@@ -2232,6 +2814,23 @@ function renderOverview(id) {
   if (id === "continuity") {
     section("Premise", para(`${b.title || "Untitled"} (${b.genre || "general fiction"}) — ${b.premise || "no premise recorded"}`));
 
+    const bookCheckBody = document.createElement("div");
+    bookCheckBody.appendChild(para("Walks every drafted chapter in book order, checking both continuity (does this chapter contradict an earlier/later one) and consistency (does it stay true to the character/world bible), against a rolling story-so-far summary. Separate from Critique, which is craft/pacing, not continuity/consistency."));
+    const bookCheckBtn = document.createElement("button");
+    bookCheckBtn.textContent = "Check";
+    bookCheckBtn.addEventListener("click", () => {
+      withInlineFeedback(bookCheckBtn, () => checkBookConsistency()).catch(() => {});
+    });
+    bookCheckBody.appendChild(bookCheckBtn);
+    const fixEverythingBtn = document.createElement("button");
+    fixEverythingBtn.textContent = "Fix all with AI";
+    fixEverythingBtn.title = "Fixes every open continuity/consistency flag and every flagged chapter, in one pass.";
+    fixEverythingBtn.addEventListener("click", () => {
+      withInlineFeedback(fixEverythingBtn, () => fixAllOutstandingContinuity()).catch(() => {});
+    });
+    bookCheckBody.appendChild(fixEverythingBtn);
+    section("Continuity & consistency", bookCheckBody);
+
     if (b.series_title && b.series_sync_pending) {
       const body = document.createElement("div");
       body.appendChild(para(
@@ -2257,7 +2856,7 @@ function renderOverview(id) {
         const ul = document.createElement("ul");
         if (c.needs_recheck) {
           const li = document.createElement("li");
-          li.textContent = "Flagged for recheck (an earlier chapter changed since approval)";
+          li.textContent = recheckMessage(c);
           ul.appendChild(li);
         }
         for (const issue of c.continuity_issues || []) {
@@ -2300,9 +2899,11 @@ function renderOverview(id) {
 
         const fixBtn = document.createElement("button");
         fixBtn.textContent = "Fix";
-        fixBtn.addEventListener("click", async () => {
-          await dispatchUniversalTask(continuityFlagToTask(flag));
-          await resolveContinuityFlag(flag.id);
+        fixBtn.addEventListener("click", () => {
+          withInlineFeedback(fixBtn, async () => {
+            await dispatchUniversalTask(continuityFlagToTask(flag));
+            await resolveContinuityFlag(flag.id);
+          }).catch(() => {});
         });
         li.appendChild(fixBtn);
 
@@ -2351,9 +2952,11 @@ function renderOverview(id) {
 
           const fixBtn = document.createElement("button");
           fixBtn.textContent = "Fix";
-          fixBtn.addEventListener("click", async () => {
-            await dispatchUniversalTask(continuityFlagToTask(flag));
-            await resolveCritiqueFlag(flag.id);
+          fixBtn.addEventListener("click", () => {
+            withInlineFeedback(fixBtn, async () => {
+              await dispatchUniversalTask(continuityFlagToTask(flag));
+              await resolveCritiqueFlag(flag.id);
+            }).catch(() => {});
           });
           li.appendChild(fixBtn);
 
@@ -2727,22 +3330,33 @@ export async function saveLlmFolders() {
   }
 }
 
+// So the review queue's status line can say which chapter a bible-sync task
+// came from, instead of just "revise character X" with no context for which
+// of several out-of-order finalizes it belongs to.
+function fromChapter(task) {
+  return task.chapter_num != null ? ` (from Chapter ${task.chapter_num})` : "";
+}
+
 function describeUniversalTask(task) {
   switch (task.action) {
     case "create_character": return "add a new character";
     case "create_world": return "add a new world entry";
     case "create_note": return "add a new note";
     case "create_timeline_event": return "add a new timeline event";
+    case "create_idea": return "add a new planted-thread idea";
     case "create_outline_entry": return `add outline chapter ${task.next_chapter_num}`;
     case "revise_outline_whole": return "revise the whole outline";
     case "revise_engine": return "revise the story engine";
-    case "revise_character": return `revise character "${task.target_name}"`;
-    case "resync_character_sections": return `resync "${task.target_name}"'s character sections`;
-    case "revise_world": return `revise world entry "${task.target_name}"`;
+    case "revise_character": return `revise character "${task.target_name}"${fromChapter(task)}`;
+    case "resync_character_sections": return `resync "${task.target_name}"'s character sections${fromChapter(task)}`;
+    case "revise_world": return `revise world entry "${task.target_name}"${fromChapter(task)}`;
     case "revise_note": return `revise note "${task.target_name}"`;
     case "revise_timeline_event": return `revise timeline event "${task.target_name}"`;
+    case "revise_idea": return `revise idea "${task.target_name}"${fromChapter(task)}`;
+    case "resolve_idea": return `mark idea "${task.target_name}" resolved${fromChapter(task)}`;
     case "revise_chapter": return `revise chapter ${task.chapter_num}`;
     case "revise_outline_entry": return `update outline chapter ${task.chapter_num}`;
+    case "revise_scene": return `revise chapter ${task.chapter_num} scene ${task.scene_num}`;
     default: return task.action;
   }
 }
@@ -2799,6 +3413,22 @@ async function dispatchUniversalTask(task) {
     $("ne-text").value = instruction;
     return;
   }
+  if (task.action === "create_idea") {
+    openIdeaModal();
+    if (task.payload) {
+      // Already drafted (proposed by the thread planner at chapter finalize) -
+      // fill the modal directly instead of asking the writer to write it from
+      // scratch.
+      $("idea-title").value = task.payload.title || "";
+      $("idea-notes").value = task.payload.notes || "";
+      $("idea-is-thread").checked = task.payload.category === "planted_thread";
+      $("idea-relates-search").value = "";
+      refreshIdeaRelatesToOptions(task.payload.linked_kind, task.payload.linked_id);
+      setStatus("Draft ready - review and edit before creating.");
+      return;
+    }
+    return;
+  }
   if (task.action === "create_outline_entry") {
     openOutlineModal();
     $("oo-chapter-num").value = task.next_chapter_num;
@@ -2825,9 +3455,34 @@ async function dispatchUniversalTask(task) {
     await reviseWithInstruction();
     return;
   }
+  if (task.action === "revise_idea") {
+    // Applied directly (no diff/approve step - see ideas.py's /revise
+    // endpoint) so this works headlessly inside fixAllOutstandingContinuity's
+    // automatic loop, not just the interactive queue.
+    await api(`/api/projects/${encodeURIComponent(state.slug)}/ideas/${task.idea_id}/revise`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction }),
+    });
+    await refreshBible();
+    renderSidebar();
+    renderEditor();
+    return;
+  }
+  if (task.action === "resolve_idea") {
+    await api(`/api/projects/${encodeURIComponent(state.slug)}/ideas/${task.idea_id}/edit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "resolved" }),
+    });
+    await refreshBible();
+    renderSidebar();
+    renderEditor();
+    return;
+  }
   if (task.action === "resync_character_sections") {
     await selectItem("characters", task.target_name);
-    await resyncCharacterSections(task.target_name, instruction);
+    await resyncCharacterSections(task.target_name, instruction, task.chapter_num);
     return;
   }
   if (task.action === "revise_chapter") {
@@ -2839,6 +3494,26 @@ async function dispatchUniversalTask(task) {
   if (task.action === "revise_outline_entry") {
     await selectItem("outline", task.chapter_num);
     await regenerateOutlineEntry(task.chapter_num, instruction);
+    return;
+  }
+  if (task.action === "revise_scene") {
+    // Job-based, applied directly on completion (see scenes.py's /revise
+    // endpoint - saves via add_scene_revision/update_scene, no separate
+    // approve step), so like revise_idea this works headlessly inside
+    // fixAllOutstandingContinuity's automatic loop. The endpoint 400s if the
+    // scene has no draft yet - let that surface as a per-flag failure rather
+    // than crashing the bulk loop.
+    const { job_id } = await api(
+      `/api/projects/${encodeURIComponent(state.slug)}/outline/${task.chapter_num}/scenes/${task.scene_num}/revise`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instruction }) }
+    );
+    await pollStreamJob(
+      `/api/projects/${encodeURIComponent(state.slug)}/outline/${task.chapter_num}/scenes/${task.scene_num}/revise/status/${job_id}`,
+      `scene ${task.scene_num} of chapter ${task.chapter_num}`
+    );
+    await refreshBible();
+    renderSidebar();
+    renderEditor();
     return;
   }
 }
@@ -2991,24 +3666,59 @@ export async function advanceUniversalQueue() {
   }
 }
 
+// Builds the free-text "what changed" summary the continuity checker's
+// retrieval is gated on, for one touched item. Shared by the batch
+// "check everything touched" flow and the per-item 3-dot-menu check, so
+// both cover the same ground - including a character's structured sections
+// (appearance/relationships/etc.) and reveals, not just its description,
+// and an outline entry's chapter storyline narrative (its summary field).
+function itemChangeSummary(kind, id) {
+  if (kind === "characters" || kind === "world" || kind === "research_notes") {
+    const e = getEntity(kind, id);
+    if (!e) return "";
+    const parts = [`${kindLabel(kind)} "${id}": ${e.description || e.content || ""}`];
+    if (kind === "characters") {
+      const sections = e.sections || {};
+      for (const key of Object.keys(sections)) {
+        if (sections[key]) parts.push(`${id} - ${CHARACTER_SECTION_LABELS[key] || key}: ${sections[key]}`);
+      }
+      const reveals = (e.reveals || []).slice().sort((a, b) => a.unlock_chapter_num - b.unlock_chapter_num);
+      for (const r of reveals) {
+        parts.push(`${id} - reveal unlocked at Chapter ${r.unlock_chapter_num}${r.section ? " (" + r.section + ")" : ""}: ${r.text}`);
+      }
+    }
+    return parts.join("\n");
+  } else if (kind === "chapter") {
+    const ch = getChapter(id);
+    return `Chapter ${id} was revised${ch && ch.summary ? ": " + ch.summary : ""}`;
+  } else if (kind === "outline") {
+    const o = getOutlineEntry(id);
+    if (!o) return "";
+    const ch = getChapter(id);
+    let line = `Outline Chapter ${id} ("${o.title || ""}") storyline: ${o.summary || ""}`;
+    if (ch && ch.summary) line += `\nChapter ${id} narrative so far: ${ch.summary}`;
+    const tags = [...(o.characters || []), ...(o.world_refs || [])];
+    if (tags.length) line += `\nChapter ${id} involves: ${tags.join(", ")}`;
+    return line;
+  } else if (kind === "overview" && id === "engine") {
+    const b = state.bible;
+    return `Story engine changed: premise=${b.premise || ""}; tone=${b.tone || ""}; narrative_voice=${b.narrative_voice || ""}; narrative_engine=${b.narrative_engine || ""}; themes=${b.themes || ""}`;
+  } else if (kind === "overview" && id === "progress") {
+    return "The whole outline was revised.";
+  } else if (kind === "act") {
+    return `Act "${id}" was revised.`;
+  } else if (kind === "timeline") {
+    const e = getEntity("timeline", id);
+    return e ? `Timeline event "${id}": ${e.description || ""}` : "";
+  }
+  return "";
+}
+
 function buildChangeSummaryFromTouched() {
   const lines = [];
   for (const t of state.touchedSections || []) {
-    if (t.kind === "characters" || t.kind === "world" || t.kind === "research_notes") {
-      const e = getEntity(t.kind, t.id);
-      if (e) lines.push(`${kindLabel(t.kind)} "${t.id}": ${e.description || e.content || ""}`);
-    } else if (t.kind === "chapter") {
-      const ch = getChapter(t.id);
-      lines.push(`Chapter ${t.id} was revised${ch && ch.summary ? ": " + ch.summary : ""}`);
-    } else if (t.kind === "outline") {
-      const o = getOutlineEntry(t.id);
-      if (o) lines.push(`Outline Chapter ${t.id} ("${o.title || ""}"): ${o.summary || ""}`);
-    } else if (t.kind === "overview" && t.id === "engine") {
-      const b = state.bible;
-      lines.push(`Story engine changed: premise=${b.premise || ""}; tone=${b.tone || ""}; narrative_voice=${b.narrative_voice || ""}; narrative_engine=${b.narrative_engine || ""}; themes=${b.themes || ""}`);
-    } else if (t.kind === "overview" && t.id === "progress") {
-      lines.push("The whole outline was revised.");
-    }
+    const line = itemChangeSummary(t.kind, t.id);
+    if (line) lines.push(line);
   }
   return lines.join("\n");
 }
@@ -3046,14 +3756,53 @@ function timelineProposalTasks(proposals, chapterNum) {
   }));
 }
 
+// Converts the thread planner's proposed forward-seeding notes (from a
+// chapter finalize job) into create_idea tasks carrying the already-drafted
+// {title, notes, linked_kind, linked_id, category} as payload, so
+// dispatchUniversalTask can pre-fill the idea modal directly. Each proposal
+// becomes an ordinary idea backlog entry tagged category="planted_thread"
+// once saved - no bible section of its own.
+function plantedThreadProposalTasks(proposals, chapterNum) {
+  if (!proposals || !proposals.length) return [];
+  return proposals.map((p) => ({
+    action: "create_idea",
+    instruction: p.note,
+    target_name: null,
+    chapter_num: null,
+    next_chapter_num: null,
+    payload: {
+      title: `Plant for Chapter ${p.linked_id}`, notes: p.note,
+      linked_kind: p.linked_kind || "outline", linked_id: p.linked_id,
+      category: "planted_thread",
+    },
+  }));
+}
+
+// Converts the thread planner's propose_resolutions() output (already-open
+// planted-thread ideas a just-finished chapter appears to pay off) into
+// resolve_idea tasks - review-gated the same way as everything else in the
+// queue, just applied directly on dispatch (see dispatchUniversalTask) since
+// marking an idea resolved has no draft/diff step of its own.
+function resolveProposalTasks(proposals, chapterNum) {
+  if (!proposals || !proposals.length) return [];
+  return proposals.map((p) => ({
+    action: "resolve_idea",
+    instruction: p.reason,
+    target_name: p.title,
+    idea_id: p.idea_id,
+    chapter_num: chapterNum,
+    next_chapter_num: null,
+  }));
+}
+
 // Converts the bible manager's unapplied character/faction/world proposals
-// (from a chapter finalize job), plus any timeline-extractor proposals, into
-// the same universal-task-queue shape used elsewhere, so each one goes
-// through a normal revise-and-approve (for an existing entry) or draft-and-
-// create (for a brand-new one) step instead of writing to the bible
-// unreviewed.
-function queueBibleProposals(proposals, chapterNum, timelineProposals) {
-  if ((!proposals || !proposals.length) && (!timelineProposals || !timelineProposals.length)) return false;
+// (from a chapter finalize job), plus any timeline-extractor, thread-
+// planner, and thread-resolution proposals, into the same universal-task-
+// queue shape used elsewhere, so each one goes through a normal revise-and-
+// approve (for an existing entry) or draft-and-create (for a brand-new one)
+// step instead of writing to the bible unreviewed.
+function queueBibleProposals(proposals, chapterNum, timelineProposals, threadProposals, resolveProposals) {
+  if ((!proposals || !proposals.length) && (!timelineProposals || !timelineProposals.length) && (!threadProposals || !threadProposals.length) && (!resolveProposals || !resolveProposals.length)) return false;
   const tasks = (proposals || []).flatMap((p) => {
     const instruction = p.exists
       ? `Add this newly established fact from Chapter ${chapterNum}: ${p.new_facts}`
@@ -3067,7 +3816,7 @@ function queueBibleProposals(proposals, chapterNum, timelineProposals) {
       action,
       instruction,
       target_name: p.target_name || null,
-      chapter_num: null,
+      chapter_num: chapterNum,
       next_chapter_num: null,
     };
     // An existing character's own structured sections (appearance,
@@ -3075,18 +3824,27 @@ function queueBibleProposals(proposals, chapterNum, timelineProposals) {
     // queue a second, separate review step so a fact like "got a scar" or
     // "reconciled with her sister" doesn't go stale in Relationships/
     // Appearance forever just because the section was already filled in.
+    // chapter_num here (unlike the sibling task above) is the fact's real
+    // source chapter, not left null - the AI needs it to tell whether this
+    // fact predates or postdates whatever the sections already reflect,
+    // since chapters are often finalized out of book order.
     if (p.exists && p.bucket === "character") {
       return [task, {
         action: "resync_character_sections",
         instruction: p.new_facts,
         target_name: p.target_name,
-        chapter_num: null,
+        chapter_num: chapterNum,
         next_chapter_num: null,
       }];
     }
     return [task];
   });
-  return enqueueUniversalTasks([...tasks, ...timelineProposalTasks(timelineProposals, chapterNum)]);
+  return enqueueUniversalTasks([
+    ...tasks,
+    ...timelineProposalTasks(timelineProposals, chapterNum),
+    ...plantedThreadProposalTasks(threadProposals, chapterNum),
+    ...resolveProposalTasks(resolveProposals, chapterNum),
+  ]);
 }
 
 // Converts auto-detected research proposals (from a non-fiction chapter
@@ -3114,24 +3872,36 @@ function continuityFlagToTask(f) {
       : f.kind === "world" ? "revise_world"
       : f.kind === "note" ? "revise_note"
       : f.kind === "timeline" ? "revise_timeline_event"
+      : f.kind === "idea" ? "revise_idea"
+      : f.kind === "outline" ? "revise_outline_entry"
+      : f.kind === "scene" ? "revise_scene"
       : f.drafted ? "revise_chapter" : "revise_outline_entry",
     instruction: f.instruction,
     target_name: f.target_name || null,
+    idea_id: f.idea_id != null ? f.idea_id : null,
     chapter_num: f.chapter_num,
+    scene_num: f.scene_num != null ? f.scene_num : null,
     next_chapter_num: null,
   };
 }
 
 async function resolveContinuityFlag(flagId) {
-  await api(`/api/projects/${encodeURIComponent(state.slug)}/continuity-flags/${flagId}/resolve`, { method: "POST" });
+  await api(`/api/projects/${encodeURIComponent(state.slug)}/flags/continuity/${flagId}/resolve`, { method: "POST" });
   state.bible.continuity_flags = (state.bible.continuity_flags || []).filter((f) => f.id !== flagId);
   renderOverview("continuity");
+  // Resolving a flag can flip a chapter/character/world/timeline item's
+  // sidebar dot and canvas card badge from yellow (warn) back to whatever
+  // they'd otherwise be (green if approved) - both read continuity_flags
+  // live, but neither re-renders on its own the way renderOverview does.
+  renderSidebar();
+  renderManuscript();
 }
 
 async function resolveCritiqueFlag(flagId) {
-  await api(`/api/projects/${encodeURIComponent(state.slug)}/critique-flags/${flagId}/resolve`, { method: "POST" });
+  await api(`/api/projects/${encodeURIComponent(state.slug)}/flags/critique/${flagId}/resolve`, { method: "POST" });
   state.bible.critique_flags = (state.bible.critique_flags || []).filter((f) => f.id !== flagId);
   renderOverview("critique");
+  renderSidebar();
 }
 
 export async function checkConsistency() {
@@ -3166,11 +3936,48 @@ export async function checkConsistency() {
   }
 }
 
+// Scoped, fast counterpart to checkConsistency() above - runs the same
+// backend check but against just one sidebar item (and, for characters, its
+// sections/reveals) instead of everything touched this session. Manual-only,
+// same as the batch check: no auto-trigger on revise.
+export async function checkConsistencyForItem(kind, id, label) {
+  if (!state.slug) return;
+  const change_summary = itemChangeSummary(kind, id);
+  if (!change_summary) {
+    setStatus("Nothing to check for this item yet.", true);
+    return;
+  }
+  setStatus(`Checking consistency for ${label || id}...`);
+  const result = await api(`/api/projects/${encodeURIComponent(state.slug)}/consistency-check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ change_summary }),
+  });
+  const flags = result.flags || [];
+  await refreshBible();
+  if (!flags.length) {
+    setStatus(`No inconsistencies found for ${label || id}.`);
+    return;
+  }
+  const tasks = flags.map(continuityFlagToTask);
+  if (!enqueueUniversalTasks(tasks)) return;
+  const firstLabel = flags[0].target_name
+    ? `${{ world: "world entry", note: "note" }[flags[0].kind] || "character"} "${flags[0].target_name}"`
+    : `chapter ${flags[0].chapter_num}`;
+  setStatus(`Found ${tasks.length} affected item${tasks.length === 1 ? "" : "s"} - starting with ${firstLabel}: ${flags[0].issue}`);
+  try {
+    await dispatchUniversalTask(state.universalQueue[state.universalQueueIndex]);
+  } finally {
+    updateUniversalQueueBar();
+  }
+}
+
 export function skipRemainingUniversalTasks() {
   state.universalQueue = [];
   state.universalQueueIndex = 0;
   $("universal-queue-bar").classList.add("hidden");
   persistTasks();
+  cancelBulkFix();
   setStatus("Remaining queued tasks skipped.");
 }
 

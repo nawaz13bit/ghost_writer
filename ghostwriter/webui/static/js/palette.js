@@ -7,7 +7,7 @@
 // since it reaches across every section rather than rendering one tree.
 import { $, state } from "./api.js";
 import {
-  checkConsistency, critiqueBook, openEntityModal, openIdeaModal, openOutlineModal, selectItem,
+  checkBookConsistency, checkConsistency, critiqueBook, openEntityModal, openIdeaModal, openOutlineModal, selectItem,
 } from "./editor.js";
 import { selectChapter } from "./manuscript.js";
 import { exportEpub, exportManuscript, exportPdf } from "./projects.js";
@@ -56,6 +56,7 @@ function actionItems() {
     { group: "New", label: "New Research Note", run: () => openEntityModal("research_notes") },
     { group: "New", label: "New Idea", run: () => openIdeaModal() },
     { group: "Do", label: "Check consistency", run: () => checkConsistency() },
+    { group: "Do", label: "Check Whole Book Consistency", run: () => checkBookConsistency() },
     { group: "Do", label: "Critique Whole Book", run: () => critiqueBook() },
     { group: "Do", label: "Export Manuscript (Markdown)", run: () => exportManuscript() },
     { group: "Do", label: "Export EPUB", run: () => exportEpub() },

@@ -10,14 +10,25 @@ ghostwriter.webui.deps.
 """
 from __future__ import annotations
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from ghostwriter.llm_client import LLMTruncated
 from ghostwriter.webui.routers import chapters, entities, ideas, llm_control, outline, projects, prompts, scenes, series
 from ghostwriter.webui.state import STATIC_DIR
 
 app = FastAPI(title="ghost_writer")
+
+
+@app.exception_handler(LLMTruncated)
+def _llm_truncated_handler(request: Request, exc: LLMTruncated) -> JSONResponse:
+    # Catches this for every synchronous AI endpoint that doesn't already
+    # handle it explicitly (background-job endpoints like chapter/scene
+    # drafting catch it themselves via their generic job["error"] path, so
+    # they never reach here) - a cut-off generation should surface as a
+    # clean 502 with an actionable message, not an unhandled 500 traceback.
+    return JSONResponse(status_code=502, content={"detail": str(exc)})
 
 app.include_router(llm_control.router)
 app.include_router(projects.router)

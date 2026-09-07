@@ -3,8 +3,13 @@ story bible, resolving a length category into concrete chapter/word counts,
 and reading a chapter's current text."""
 from __future__ import annotations
 
+import functools
+import inspect
+import threading
+from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from fastapi import HTTPException
 
@@ -19,6 +24,59 @@ def load_bible(slug: str) -> StoryBible:
     if not path.exists():
         raise HTTPException(404, f"No project {slug!r}")
     return StoryBible.load(cfg["paths"]["projects_dir"], slug, dir_slug=slug)
+
+
+# StoryBible.save() always does a full-document read-modify-write with no
+# locking or merge: every mutating endpoint does load_bible() (a fresh,
+# independent in-memory copy) then eventually bible.save() (an atomic
+# overwrite of the *entire* file, not just what it touched). If two such
+# handlers' load-mutate-save windows overlap for the same project, the one
+# that saves last silently clobbers the other's change with no error. The
+# fix is a per-slug re-entrant lock held for the handler's whole
+# load-mutate-save span, so overlapping requests on the same project
+# serialize instead of racing (RLock so a handler that calls another
+# lock-wrapped helper internally, on the same thread, doesn't deadlock).
+_bible_locks: dict[str, threading.RLock] = defaultdict(threading.RLock)
+_bible_locks_guard = threading.Lock()
+
+
+def _get_bible_lock(slug: str) -> threading.RLock:
+    with _bible_locks_guard:
+        return _bible_locks[slug]
+
+
+@contextmanager
+def bible_lock(slug: str):
+    lock = _get_bible_lock(slug)
+    with lock:
+        yield
+
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def with_bible_lock(func: _F) -> _F:
+    """Decorator for a route handler or background-job worker that loads,
+    mutates, and saves a project's StoryBible. Wraps the whole call in that
+    project's bible_lock so it can't race another such call on the same
+    project. Finds the project slug from a `slug` argument (by keyword, as
+    FastAPI calls sync route handlers, or by position, as job-worker
+    functions are called from a plain `threading.Thread`)."""
+    try:
+        slug_index = list(inspect.signature(func).parameters).index("slug")
+    except ValueError:
+        raise TypeError(f"{func!r} has no 'slug' parameter to lock on") from None
+
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if "slug" in kwargs:
+            slug = kwargs["slug"]
+        else:
+            slug = args[slug_index]
+        with bible_lock(slug):
+            return func(*args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]
 
 
 def get_author(bible: StoryBible) -> AuthorAgent:

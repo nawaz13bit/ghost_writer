@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from ghostwriter.agents.base import AIOutputError
 from ghostwriter.llm_client import LLMCancelled
-from ghostwriter.webui.deps import load_bible
+from ghostwriter.webui.deps import load_bible, with_bible_lock
 from ghostwriter.webui.state import continuity_checker, outliner
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,7 @@ class NewOutlineRequest(BaseModel):
     act: str | None = None
     outline: str = ""
     characters: list[str] | None = None
+    world_refs: list[str] | None = None
 
 
 class OutlineEditRequest(BaseModel):
@@ -34,9 +35,11 @@ class OutlineEditRequest(BaseModel):
     act: str | None = None
     outline: str | None = None
     characters: list[str] | None = None
+    world_refs: list[str] | None = None
 
 
 @router.post("/api/projects/{slug}/outline")
+@with_bible_lock
 def create_outline_entry(slug: str, req: NewOutlineRequest) -> dict[str, Any]:
     """Manually adds an outline entry. If its act name is new, this also
     implicitly creates that act (acts can also be created standalone, with no
@@ -44,7 +47,7 @@ def create_outline_entry(slug: str, req: NewOutlineRequest) -> dict[str, Any]:
     bible = load_bible(slug)
     try:
         return bible.add_outline_entry(
-            req.chapter_num, req.title, req.summary, req.act, req.outline, req.characters
+            req.chapter_num, req.title, req.summary, req.act, req.outline, req.characters, req.world_refs
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -70,6 +73,7 @@ def suggest_outline_entry(slug: str, req: SuggestOutlineEntryRequest) -> dict[st
 
 
 @router.post("/api/projects/{slug}/outline/{chapter_num}/edit")
+@with_bible_lock
 def edit_outline_entry(slug: str, chapter_num: int, req: OutlineEditRequest) -> dict[str, Any]:
     bible = load_bible(slug)
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
@@ -87,6 +91,7 @@ class RegenerateOutlineEntryRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/outline/{chapter_num}/regenerate")
+@with_bible_lock
 def regenerate_outline_entry(slug: str, chapter_num: int, req: RegenerateOutlineEntryRequest | None = None) -> dict[str, Any]:
     """Regenerates a single outline entry with the AI, using the rest of the
     outline plus already-drafted chapters/continuity issues as context so it
@@ -114,6 +119,7 @@ class ConsistencyCheckRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/consistency-check")
+@with_bible_lock
 def consistency_check(slug: str, req: ConsistencyCheckRequest) -> dict[str, Any]:
     """Scans drafted chapters and outline entries for consequences of a
     change elsewhere in the bible (e.g. a character/world/engine edit or an
@@ -133,13 +139,25 @@ def consistency_check(slug: str, req: ConsistencyCheckRequest) -> dict[str, Any]
     return {"flags": flags}
 
 
-@router.post("/api/projects/{slug}/continuity-flags/{flag_id}/resolve")
-def resolve_continuity_flag(slug: str, flag_id: int) -> dict[str, Any]:
-    """Dismisses a persisted continuity flag from the Continuity view -
+# continuity_flags and critique_flags are kept as two separate lists on the
+# bible (see story_bible.py) - developmental-editing findings render in their
+# own section - so this only unifies the resolve *route*, not the data.
+RESOLVE_FLAG_KIND = {
+    "continuity": lambda bible, flag_id: bible.resolve_continuity_flag(flag_id),
+    "critique": lambda bible, flag_id: bible.resolve_critique_flag(flag_id),
+}
+
+
+@router.post("/api/projects/{slug}/flags/{kind}/{flag_id}/resolve")
+@with_bible_lock
+def resolve_flag(slug: str, kind: str, flag_id: int) -> dict[str, Any]:
+    """Dismisses a persisted continuity or critique flag from its view -
     doesn't touch the flagged item itself, just marks the finding handled
     (or acknowledged as a non-issue) so it stops showing as open."""
+    if kind not in RESOLVE_FLAG_KIND:
+        raise HTTPException(400, f"Unsupported flag kind {kind!r}")
     bible = load_bible(slug)
-    bible.resolve_continuity_flag(flag_id)
+    RESOLVE_FLAG_KIND[kind](bible, flag_id)
     return {"ok": True}
 
 
@@ -169,6 +187,7 @@ class ApplyOutlineRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/outline/apply")
+@with_bible_lock
 def apply_outline(slug: str, req: ApplyOutlineRequest) -> list[dict[str, Any]]:
     """Saves a full outline replacement (from the Revise Whole Outline flow).
     Refuses to drop or renumber any chapter that already has drafted/approved
@@ -207,6 +226,7 @@ class ActEditRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/acts/{name}")
+@with_bible_lock
 def save_act_summary(slug: str, name: str, req: ActEditRequest) -> dict[str, Any]:
     """Saves the act-level summary (what happens across this act, before it's
     broken into individual chapter outlines). Also doubles as the "create a
@@ -221,6 +241,7 @@ class ElaborateActRequest(BaseModel):
 
 
 @router.post("/api/projects/{slug}/acts/{name}/elaborate")
+@with_bible_lock
 def elaborate_act_summary(slug: str, name: str, req: ElaborateActRequest | None = None) -> dict[str, Any]:
     """Expands the act's summary with AI, using its own chapter outline
     entries as context. Saves the result immediately, same as a manual edit -
@@ -238,6 +259,7 @@ def elaborate_act_summary(slug: str, name: str, req: ElaborateActRequest | None 
 
 
 @router.delete("/api/projects/{slug}/outline/{chapter_num}")
+@with_bible_lock
 def delete_outline_entry(slug: str, chapter_num: int) -> dict[str, Any]:
     bible = load_bible(slug)
     try:

@@ -17,6 +17,7 @@
   --panel-bg: #ffffff;
   --warn-bg: #fff4d6;
   --warn-fg: #7a5c00;
+  --bridge-bg: #eeeef1;
   --radius: 10px;
   --shadow: 0 1px 3px rgba(27, 29, 34, 0.12);
   --shadow-lift: 0 8px 24px rgba(27, 29, 34, 0.18);
@@ -56,6 +57,7 @@
   --panel-bg: #1b1e24;
   --warn-bg: #4a3b00;
   --warn-fg: #ffdd66;
+  --bridge-bg: #2a2d35;
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
   --shadow-lift: 0 8px 24px rgba(0, 0, 0, 0.5);
 
@@ -91,6 +93,7 @@
     --panel-bg: #1b1e24;
     --warn-bg: #4a3b00;
     --warn-fg: #ffdd66;
+    --bridge-bg: #2a2d35;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
     --shadow-lift: 0 8px 24px rgba(0, 0, 0, 0.5);
 
@@ -132,7 +135,7 @@ body {
 #tab-panel-settings {
   flex: 1;
   min-height: 0;
-  margin: 0.9rem auto;
+  margin: 0.9rem 0.9rem 0.9rem 1.6rem;
   padding: 0.2rem 1.3rem 1.3rem;
   max-width: 720px;
   overflow-y: auto;
@@ -174,6 +177,7 @@ body {
   margin-top: 0.6rem;
 }
 .settings-row:first-of-type { margin-top: 0; }
+.settings-row:has(#llm-models-folder) { align-items: flex-end; }
 button.danger { color: var(--del-fg); border-color: var(--del-fg); }
 button.danger:hover { background: var(--del-bg); }
 
@@ -222,7 +226,10 @@ button.danger:hover { background: var(--del-bg); }
   color: var(--muted);
   font-size: 0.82rem;
   pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.6s ease;
 }
+#status-msg.fading { opacity: 0; }
 #status-msg:not(:empty) {
   padding: 0.5rem 0.9rem;
   border: 1px solid var(--border);
@@ -413,6 +420,7 @@ textarea.text { border: none; resize: vertical; font-family: inherit; color: inh
 
 ins { background: var(--ins-bg); color: var(--ins-fg); text-decoration: none; border-radius: 2px; }
 del { background: var(--del-bg); color: var(--del-fg); text-decoration: line-through; border-radius: 2px; }
+.diff-bridge { background: var(--bridge-bg); border-radius: 2px; }
 
 #draft-actions { flex-shrink: 0; border-top: 1px solid var(--border); background: var(--canvas-bg); }
 #instruction-bar { display: flex; gap: 0.6rem; padding: 0.6rem 0.75rem; }
@@ -481,6 +489,22 @@ del { background: var(--del-bg); color: var(--del-fg); text-decoration: line-thr
 }
 .rail-llm-dot.starting { background: var(--warn-fg); }
 .rail-llm-dot.off { background: var(--muted-faint); }
+#rail-continuity-btn { position: relative; }
+#rail-continuity-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--warn-fg);
+  color: var(--canvas-bg);
+  font-size: 0.6rem;
+  line-height: 14px;
+  text-align: center;
+  border: 2px solid var(--canvas-bg);
+}
 #icon-rail .rail-btn {
   width: 34px;
   height: 34px;
@@ -666,7 +690,7 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .modal-backdrop { position: fixed; inset: 0; background: rgba(32,29,25,0.4); display: flex; align-items: center; justify-content: center; z-index: 300; }
-.modal { background: var(--bg); border-radius: var(--radius); padding: 1.1rem 1.3rem; width: 420px; max-width: 90vw; max-height: 90vh; overflow-y: auto; display: flex; flex-direction: column; gap: 0.55rem; box-shadow: var(--shadow-lift); }
+.modal { background: var(--bg); border-radius: var(--radius); padding: 1.1rem 1.3rem; width: 420px; max-width: 90vw; max-height: 90vh; overflow-y: auto; display: flex; flex-direction: column; gap: 0.55rem; box-shadow: var(--shadow-lift); position: relative; }
 .modal h3 { margin: 0 0 0.15rem; font-size: 1.05rem; }
 .modal label { display: flex; flex-direction: column; font-size: 0.85rem; gap: 0.25rem; }
 .modal input, .modal textarea, .modal select { padding: 0.4rem 0.5rem; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-family: inherit; }
@@ -674,6 +698,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 #ro-outline-text { font-family: monospace; font-size: 0.8rem; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.5rem; }
 .modal-hint { font-size: 0.8rem; opacity: 0.75; margin: 0; }
+.modal.resizable-modal { resize: both; overflow: auto; min-width: 320px; min-height: 180px; padding-right: 2.1rem; }
+.modal.resizable-modal > h3.modal-drag-handle { cursor: move; user-select: none; padding-right: 1.6rem; }
+.modal-reset-btn { position: absolute; top: 0.55rem; right: 0.6rem; width: 1.5rem; height: 1.5rem; line-height: 1; padding: 0; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); opacity: 0.55; cursor: pointer; font-size: 0.9rem; }
+.modal-reset-btn:hover { opacity: 1; }
 
 #busy-overlay { position: fixed; inset: 0; z-index: 1000; background: transparent; cursor: wait; }
 #busy-bar { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 1001; background: transparent; overflow: visible; }

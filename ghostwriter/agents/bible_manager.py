@@ -49,14 +49,22 @@ class BibleManagerAgent(Agent):
         """Returns a list of proposed bible updates for the writer to review -
         does not touch the bible. Each item: {bucket, name, exists,
         target_name (canonical existing name, only if exists), role_or_category,
-        new_facts}."""
-        prompt = f"""Existing character bible:
-{bible.characters_brief()}
+        new_facts}.
 
-Existing world bible (includes factions/cultures/species, filed under their
-own category such as "faction" or "culture", as well as places/history/
-rules under other categories):
-{bible.world_brief()}
+        The character+world bible is batched (see Agent.ask_json_batched)
+        instead of dumped whole into one prompt - on a long-running project
+        the combined bible can grow past the model's context window well
+        before any single chapter does, which is what was crashing the
+        manual "Re-sync bible/timeline updates" recovery action with a 400
+        from the local server. Each batch is judged against the same
+        chapter text independently and the proposals are merged; a small
+        bible still fits in one batch and behaves exactly as before."""
+        entries = bible.characters_brief().split("\n") + bible.world_brief().split("\n")
+
+        def build_prompt(bible_chunk: str) -> str:
+            return f"""Existing character/world bible (a portion of it - character and
+world/faction/culture entries are mixed together below):
+{bible_chunk}
 
 --- CHAPTER {chapter_num} ---
 {text}
@@ -64,14 +72,17 @@ rules under other categories):
 
 List any new characters, new facts about existing characters, new
 factions/cultures/species, or new world-building facts established in this
-chapter. Respond with ONLY a JSON array like:
+chapter that relate to the bible entries above. Respond with ONLY a JSON
+array like:
 [{{"bucket": "character", "name": "...", "role": "...", "new_facts": "..."}}, ...]"""
-        updates = self.ask_json(prompt)
-        if isinstance(updates, dict):
-            updates = [updates]
-        if not isinstance(updates, list):
-            return []
 
+        updates = self.ask_json_batched(entries, build_prompt)
+
+        # A genuinely new name (not yet in any bible entry) isn't filtered
+        # out by any single batch, so every batch independently proposes it -
+        # merge same (bucket, name) proposals across batches into one instead
+        # of showing the writer N duplicate review cards for one new fact.
+        by_key: dict[tuple[str, str], dict] = {}
         proposals = []
         for u in updates:
             if not isinstance(u, dict):
@@ -94,12 +105,21 @@ chapter. Respond with ONLY a JSON array like:
                 existing = bible.find_world_entry(name)
                 role_or_category = "faction" if bucket == "faction" else "misc"
 
-            proposals.append({
+            key = (bucket, name.lower())
+            existing_proposal = by_key.get(key)
+            if existing_proposal:
+                if new_facts.strip() not in existing_proposal["new_facts"]:
+                    existing_proposal["new_facts"] += f" {new_facts.strip()}"
+                continue
+
+            proposal = {
                 "bucket": bucket,
                 "name": name,
                 "exists": existing is not None,
                 "target_name": existing.get("name") if existing else None,
                 "role_or_category": role_or_category,
                 "new_facts": new_facts.strip(),
-            })
+            }
+            by_key[key] = proposal
+            proposals.append(proposal)
         return proposals
