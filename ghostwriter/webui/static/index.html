@@ -62,6 +62,7 @@
       <button class="tab-btn rail-btn active" data-tab="manuscript" title="Manuscript">&#9998;</button>
       <button class="tab-btn rail-btn" data-tab="plan" title="Plan">&#9776;</button>
       <button class="tab-btn rail-btn" data-tab="continuity" id="rail-continuity-btn" title="Continuity">&#128269;<span id="rail-continuity-dot" class="hidden"></span></button>
+      <button class="tab-btn rail-btn" data-tab="timeline" title="Timeline">&#8987;</button>
       <button id="btn-universal-toggle" class="rail-btn" title="Tell it what you want (press /)">&#10024;</button>
       <div class="rail-spacer"></div>
       <button class="tab-btn rail-btn" data-tab="settings" id="rail-settings-btn" title="Settings - prompts, local model, project">
@@ -172,6 +173,26 @@
   </div>
   </div>
 
+  <div id="tab-panel-timeline" class="hidden">
+    <div id="timeline-tab-header">
+      <h2>Timeline</h2>
+      <button id="btn-timeline-close" title="Close">&times;</button>
+    </div>
+    <section id="timeline-tracks-manager">
+      <h3>Tracks</h3>
+      <div id="tt-list"></div>
+      <div class="settings-row">
+        <input id="tt-new-name" placeholder="New track name">
+        <input id="tt-new-color" type="color" value="#4a90d9">
+        <button id="tt-add">+ Add track</button>
+      </div>
+    </section>
+    <section id="timeline-swimlane-section">
+      <h3>Chronology</h3>
+      <div id="timeline-swimlane"></div>
+    </section>
+  </div>
+
   <div id="canvas-drawer" class="hidden">
     <div id="drawer-header">
       <div id="editor-heading"><span id="editor-kind-pill" class="kind-pill"></span><h2 id="editor-title"></h2></div>
@@ -194,6 +215,7 @@
           title="Renumbering isn't supported here - it would orphan the chapter's drafted text. Delete and re-create if you truly need a different number."></label>
         <label>Title <input id="oe-title"></label>
         <label>Act <input id="oe-act" placeholder="e.g. Act 1" list="act-options"></label>
+        <label>Timeline track (optional) <select id="oe-track"><option value="">(none)</option></select></label>
         <label>Summary <textarea id="oe-summary" placeholder="Short logline (2-3 sentences)."></textarea></label>
         <label>Characters in this chapter <input id="oe-characters" placeholder="Comma-separated names - used to pull in continuity from their nearest other chapter, earlier or later, when writing out of order"></label>
         <label>Locations / world / objects in this chapter <input id="oe-world-refs" placeholder="Comma-separated names - not shown in the manuscript; tells the consistency checker which chapters to scan when one of these changes"></label>
@@ -348,6 +370,33 @@
         <input id="tc-status" placeholder="e.g. dead, missing, alive">
         <button id="tc-save">Save</button>
         <button id="tc-clear">Clear</button>
+      </div>
+
+      <div id="timeline-placement" class="hidden cs-field">
+        <h4>Timeline placement</h4>
+        <p class="modal-hint">For non-linear timelines: which track this event belongs to, its
+          in-world sequence number, and whether it's a reveal of an earlier event.</p>
+        <label>Track</label>
+        <select id="tp-track"><option value="">(none / main)</option></select>
+        <label>Chrono order (in-world sequence number)</label>
+        <input id="tp-chrono" type="number">
+        <label>Refers back to (this event reveals an earlier one)</label>
+        <select id="tp-refers"><option value="">(none)</option></select>
+        <button id="tp-save">Save placement</button>
+        <h4>Crosspoints</h4>
+        <p class="modal-hint">Links to events on other tracks - cause and effect, shared
+          location/object, or an intentional paradox loop.</p>
+        <div id="tp-crosspoints-list"></div>
+        <div class="settings-row">
+          <select id="tp-cp-target"></select>
+          <select id="tp-cp-type">
+            <option value="cause_effect">Cause &rarr; Effect</option>
+            <option value="shared_location">Shared location</option>
+            <option value="shared_object">Shared object</option>
+            <option value="paradox_loop">Paradox loop (intentional)</option>
+          </select>
+          <button id="tp-cp-add">Add crosspoint</button>
+        </div>
       </div>
 
       <div id="character-sections" class="hidden">

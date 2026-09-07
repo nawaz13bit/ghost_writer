@@ -709,6 +709,11 @@ export function renderEditor() {
     renderTimelineConsequence(record);
   }
 
+  $("timeline-placement").classList.toggle("hidden", kind !== "timeline");
+  if (kind === "timeline") {
+    renderTimelinePlacement(record);
+  }
+
   $("instruction").value = "";
 }
 
@@ -1125,6 +1130,116 @@ export async function clearTimelineConsequence() {
   await refreshBible();
   markTouched(kind, name, `Timeline: ${name}`);
   setStatus("Cleared.");
+}
+
+const CROSSPOINT_TYPE_LABEL = {
+  cause_effect: "Cause → Effect",
+  shared_location: "Shared location",
+  shared_object: "Shared object",
+  paradox_loop: "Paradox loop (intentional)",
+};
+
+function renderTimelinePlacement(record) {
+  populateTrackSelect("tp-track", record.track_id);
+  $("tp-chrono").value = record.chrono_order ?? "";
+
+  const otherEvents = (state.bible?.timeline || []).filter(e => e.name !== record.name);
+
+  const refersSel = $("tp-refers");
+  refersSel.innerHTML = '<option value="">(none)</option>';
+  for (const e of otherEvents) {
+    const opt = document.createElement("option");
+    opt.value = e.name;
+    opt.textContent = e.name;
+    refersSel.appendChild(opt);
+  }
+  refersSel.value = record.refers_back_to || "";
+
+  const targetSel = $("tp-cp-target");
+  targetSel.innerHTML = "";
+  for (const e of otherEvents) {
+    const opt = document.createElement("option");
+    opt.value = e.name;
+    opt.textContent = e.name;
+    targetSel.appendChild(opt);
+  }
+
+  const list = $("tp-crosspoints-list");
+  list.innerHTML = "";
+  const crosspoints = (state.bible?.timeline_crosspoints || [])
+    .filter(cp => cp.from_event === record.name || cp.to_event === record.name);
+  if (crosspoints.length === 0) {
+    list.textContent = "(none)";
+  } else {
+    for (const cp of crosspoints) {
+      const row = document.createElement("div");
+      row.className = "settings-row";
+      const other = cp.from_event === record.name ? cp.to_event : cp.from_event;
+      const arrow = cp.from_event === record.name ? "→" : "←";
+      const label = document.createElement("span");
+      label.textContent = `${arrow} ${other} (${CROSSPOINT_TYPE_LABEL[cp.type] || cp.type})`;
+      const removeBtn = document.createElement("button");
+      removeBtn.textContent = "Remove";
+      removeBtn.addEventListener("click", () => {
+        withInlineFeedback(removeBtn, () => removeCrosspoint(cp.from_event, cp.to_event, cp.type)).catch(() => {});
+      });
+      row.appendChild(label);
+      row.appendChild(removeBtn);
+      list.appendChild(row);
+    }
+  }
+}
+
+export async function saveTimelinePlacement() {
+  const { kind, id: name } = state.selection || {};
+  if (kind !== "timeline") return;
+  const track_id = $("tp-track").value || null;
+  const chronoRaw = $("tp-chrono").value.trim();
+  const chrono_order = chronoRaw === "" ? null : parseInt(chronoRaw, 10);
+  const refers_back_to = $("tp-refers").value || null;
+  setStatus("Saving timeline placement...");
+  await api(`/api/projects/${encodeURIComponent(state.slug)}/entities/timeline/${encodeURIComponent(name)}/placement`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ track_id, chrono_order, refers_back_to }),
+  });
+  await refreshBible();
+  renderEditor();
+  markTouched(kind, name, `Timeline: ${name}`);
+  setStatus("Saved.");
+}
+
+export async function addTimelineCrosspoint() {
+  const { kind, id: name } = state.selection || {};
+  if (kind !== "timeline") return;
+  const to_event = $("tp-cp-target").value;
+  const type = $("tp-cp-type").value;
+  if (!to_event) {
+    setStatus("Choose another timeline event to link to.", true);
+    return;
+  }
+  setStatus("Adding crosspoint...");
+  await api(`/api/projects/${encodeURIComponent(state.slug)}/timeline/crosspoints`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from_event: name, to_event, type }),
+  });
+  await refreshBible();
+  renderEditor();
+  markTouched(kind, name, `Timeline: ${name}`);
+  setStatus("Added.");
+}
+
+async function removeCrosspoint(from_event, to_event, type) {
+  setStatus("Removing crosspoint...");
+  await api(`/api/projects/${encodeURIComponent(state.slug)}/timeline/crosspoints`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from_event, to_event, type }),
+  });
+  await refreshBible();
+  renderEditor();
+  setStatus("Removed.");
 }
 
 export async function renameEntity() {
@@ -1955,6 +2070,20 @@ function refreshActOptions() {
   }
 }
 
+function populateTrackSelect(selectId, currentValue) {
+  const sel = $(selectId);
+  const placeholder = sel.querySelector('option[value=""]');
+  sel.innerHTML = "";
+  if (placeholder) sel.appendChild(placeholder);
+  for (const t of state.bible?.timeline_tracks || []) {
+    const opt = document.createElement("option");
+    opt.value = t.id;
+    opt.textContent = t.name;
+    sel.appendChild(opt);
+  }
+  sel.value = currentValue || "";
+}
+
 function renderOutlineEditor(chapterNum) {
   const entry = getOutlineEntry(chapterNum) || { chapter_num: chapterNum, title: "", act: "", summary: "" };
   refreshActOptions();
@@ -1965,6 +2094,7 @@ function renderOutlineEditor(chapterNum) {
   $("oe-characters").value = (entry.characters || []).join(", ");
   $("oe-world-refs").value = (entry.world_refs || []).join(", ");
   $("oe-outline").value = entry.outline || "";
+  populateTrackSelect("oe-track", entry.track_id);
 
   const actions = $("editor-actions");
   actions.innerHTML = "";
@@ -2313,11 +2443,12 @@ async function saveOutlineEntry(chapterNum) {
   const outline = $("oe-outline").value.trim();
   const characters = $("oe-characters").value.split(",").map(s => s.trim()).filter(Boolean);
   const world_refs = $("oe-world-refs").value.split(",").map(s => s.trim()).filter(Boolean);
+  const track_id = $("oe-track").value;
   setStatus("Saving outline entry...");
   await api(`/api/projects/${encodeURIComponent(state.slug)}/outline/${chapterNum}/edit`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, act, summary, outline, characters, world_refs }),
+    body: JSON.stringify({ title, act, summary, outline, characters, world_refs, track_id }),
   });
   await refreshBible();
   renderSidebar();

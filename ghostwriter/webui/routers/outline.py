@@ -27,6 +27,7 @@ class NewOutlineRequest(BaseModel):
     outline: str = ""
     characters: list[str] | None = None
     world_refs: list[str] | None = None
+    track_id: str | None = None
 
 
 class OutlineEditRequest(BaseModel):
@@ -36,6 +37,7 @@ class OutlineEditRequest(BaseModel):
     outline: str | None = None
     characters: list[str] | None = None
     world_refs: list[str] | None = None
+    track_id: str | None = None
 
 
 @router.post("/api/projects/{slug}/outline")
@@ -47,7 +49,8 @@ def create_outline_entry(slug: str, req: NewOutlineRequest) -> dict[str, Any]:
     bible = load_bible(slug)
     try:
         return bible.add_outline_entry(
-            req.chapter_num, req.title, req.summary, req.act, req.outline, req.characters, req.world_refs
+            req.chapter_num, req.title, req.summary, req.act, req.outline, req.characters, req.world_refs,
+            req.track_id,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))

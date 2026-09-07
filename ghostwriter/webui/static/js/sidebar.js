@@ -40,6 +40,7 @@ function toEntityKind(branchKey) {
 
 const collapsed = new Set();
 const collapsedActs = new Set();
+let timelineTrackFilter = ""; // "" = all tracks; "" also matches events with no track set
 
 export function showSidebar() {
   $("tree-sidebar").classList.remove("hidden");
@@ -83,10 +84,16 @@ function leavesFor(branchKey) {
     // a later chapter drafted first must not appear before an earlier
     // chapter's event drafted afterward. Undated/no-chapter events sort
     // first; "order" only breaks ties within the same chapter.
-    return (state.bible.timeline || []).slice().sort((a, b) => {
+    return (state.bible.timeline || [])
+      .filter(e => !timelineTrackFilter || (e.track_id || "") === timelineTrackFilter)
+      .slice().sort((a, b) => {
       const ca = a.chapter_num ?? -1, cb = b.chapter_num ?? -1;
       return ca !== cb ? ca - cb : (a.order || 0) - (b.order || 0);
-    }).map(e => ({ id: e.name, name: e.story_date ? `${e.story_date}: ${e.name}` : e.name, record: e }));
+    }).map(e => {
+      const chronoBadge = e.chrono_order != null ? `⧗${e.chrono_order} ` : "";
+      const label = e.story_date ? `${e.story_date}: ${e.name}` : e.name;
+      return { id: e.name, name: `${chronoBadge}${label}`, record: e };
+    });
   }
   return (state.bible[branchKey] || []).map(e => ({ id: e.name || e.topic, name: e.name || e.topic, record: e }));
 }
@@ -505,6 +512,28 @@ function renderOneSidebar(rootId, branches) {
     const list = document.createElement("div");
     list.className = "sb-leaves";
     if (collapsed.has(branch.key)) list.classList.add("hidden");
+
+    if (branch.key === "timeline" && (state.bible.timeline_tracks || []).length) {
+      const filterSel = document.createElement("select");
+      filterSel.className = "sb-track-filter";
+      const allOpt = document.createElement("option");
+      allOpt.value = "";
+      allOpt.textContent = "All tracks";
+      filterSel.appendChild(allOpt);
+      for (const t of state.bible.timeline_tracks) {
+        const opt = document.createElement("option");
+        opt.value = t.id;
+        opt.textContent = t.name;
+        filterSel.appendChild(opt);
+      }
+      filterSel.value = timelineTrackFilter;
+      filterSel.addEventListener("click", (e) => e.stopPropagation());
+      filterSel.addEventListener("change", () => {
+        timelineTrackFilter = filterSel.value;
+        renderSidebar();
+      });
+      list.appendChild(filterSel);
+    }
     if (!leaves.length) {
       const empty = document.createElement("div");
       empty.className = "sb-empty";

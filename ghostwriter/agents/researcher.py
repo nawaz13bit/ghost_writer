@@ -100,7 +100,6 @@ Respond with ONLY a JSON array of strings."""
 
     def research(self, bible: StoryBible, topics: list[str] | None = None) -> None:
         self.system_prompt = SYSTEM_PROMPT
-        already_known = bible.research_brief()
         engine_brief = bible.story_engine_brief()
         engine_section = f"\n{engine_brief}\n" if engine_brief else ""
         web_context = ""
@@ -121,13 +120,15 @@ Respond with ONLY a JSON array of strings."""
             "(No web sources were available - use your own knowledge, and flag in the "
             "content when a detail should be double-checked before publishing.)"
         )
-        prompt = f"""Book title: {bible.data['title']}
+
+        def build_prompt(known_batch: str) -> str:
+            return f"""Book title: {bible.data['title']}
 Genre: {bible.data['genre']}
 Premise: {bible.data['premise']}
 {engine_section}
 Research notes already established (from this book or earlier books in the
 series - do not duplicate these, only add genuinely new notes):
-{already_known}
+{known_batch}
 
 {topics_hint}
 
@@ -138,9 +139,23 @@ details, terminology, and sensory/atmospheric texture relevant to this story.
 Respond with ONLY a JSON array like:
 [{{"topic": "...", "content": "..."}}, ...]"""
 
-        notes = self.ask_json(prompt)
+        # research_brief() can grow unboundedly as a long/nonfiction project
+        # accumulates notes - batched the same way bible_manager/
+        # timeline_extractor already are, so a large "already known" dump
+        # can't 400 this call. Each batch independently proposes new notes
+        # against only its slice of known notes, so the same new topic can
+        # surface from more than one batch - deduped by topic below rather
+        # than merged, since these are proposals for distinct new notes, not
+        # updates to an existing entry.
+        known_lines = bible.research_note_lines()
+        notes = self.ask_json_batched(known_lines, build_prompt) if known_lines else self.ask_json(build_prompt("(no research notes yet)"))
+        seen_topics: set[str] = set()
         for note in notes:
-            bible.add_research_note(note["topic"], note["content"])
+            topic = note.get("topic")
+            if not topic or topic.strip().lower() in seen_topics:
+                continue
+            seen_topics.add(topic.strip().lower())
+            bible.add_research_note(topic, note.get("content", ""))
 
     def suggest_one(self, bible: StoryBible, freeform: str) -> dict:
         """Researches and drafts a single new note from a freeform topic, for
@@ -236,13 +251,14 @@ Respond with ONLY a JSON array of strings."""
         if not sources:
             return []
         web_context = self._sources_to_context(sources)
-        already_known = bible.research_brief()
-        prompt = f"""Book title: {bible.data['title']}
+
+        def build_prompt(known_batch: str) -> str:
+            return f"""Book title: {bible.data['title']}
 Subject/category: {bible.data['genre']}
 Premise: {bible.data['premise']}
 
 Research notes already established - do not duplicate these:
-{already_known}
+{known_batch}
 
 Web research findings gathered for Chapter {chapter_num} ("{entry.get('title', '')}"),
 cite specifics from these sources rather than generic claims:
@@ -251,18 +267,23 @@ cite specifics from these sources rather than generic claims:
 Produce one research note per distinct claim/topic that is well-supported by
 the sources above. Respond with ONLY a JSON array like:
 [{{"topic": "...", "content": "..."}}, ...]"""
+
+        # Same batching rationale as research() above - research_brief() can
+        # grow past context on a long project even though this call only
+        # runs per-chapter.
+        known_lines = bible.research_note_lines()
         try:
-            notes = self.ask_json(prompt)
+            notes = self.ask_json_batched(known_lines, build_prompt) if known_lines else self.ask_json(build_prompt("(no research notes yet)"))
         except ValueError:
             return []
-        if not isinstance(notes, list):
-            return []
+        seen_topics: set[str] = set()
         proposals = []
         for note in notes:
             if not isinstance(note, dict):
                 continue
             topic, content = note.get("topic"), note.get("content")
-            if not topic or not content:
+            if not topic or not content or topic.strip().lower() in seen_topics:
                 continue
+            seen_topics.add(topic.strip().lower())
             proposals.append({"topic": topic, "content": content, "sources": sources})
         return proposals

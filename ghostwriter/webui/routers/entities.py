@@ -61,6 +61,39 @@ class NewTimelineEventRequest(BaseModel):
     consequence: TimelineConsequence | None = None
     characters: list[str] = []
     locations: list[str] = []
+    track_id: str | None = None
+    chrono_order: int | None = None
+    refers_back_to: str | None = None
+
+
+class TimelinePlacementRequest(BaseModel):
+    track_id: str | None = None
+    chrono_order: int | None = None
+    refers_back_to: str | None = None
+
+
+class NewTimelineTrackRequest(BaseModel):
+    name: str
+    description: str = ""
+    color: str | None = None
+
+
+class UpdateTimelineTrackRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    color: str | None = None
+
+
+class NewCrosspointRequest(BaseModel):
+    from_event: str
+    to_event: str
+    type: str
+
+
+class DeleteCrosspointRequest(BaseModel):
+    from_event: str
+    to_event: str
+    type: str
 
 
 class SuggestEntityRequest(BaseModel):
@@ -205,6 +238,7 @@ def create_timeline_event(slug: str, req: NewTimelineEventRequest) -> dict[str, 
     bible.add_timeline_event(
         req.name, req.story_date, req.description, req.chapter_num,
         consequence=consequence, characters=req.characters, locations=req.locations,
+        track_id=req.track_id, chrono_order=req.chrono_order, refers_back_to=req.refers_back_to,
     )
     return bible.get_entity("timeline", req.name)
 
@@ -223,6 +257,92 @@ def set_timeline_consequence(slug: str, name: str, req: TimelineConsequence | No
         return bible.update_timeline_event(name, consequence=consequence)
     except ValueError as exc:
         raise HTTPException(404, str(exc))
+
+
+@router.post("/api/projects/{slug}/entities/timeline/{name}/placement")
+@with_bible_lock
+def set_timeline_placement(slug: str, name: str, req: TimelinePlacementRequest) -> dict[str, Any]:
+    """Sets an existing timeline event's track/chrono-order/reveal-link -
+    the structured non-linear-timeline fields, distinct from the freeform
+    description edited via the generic entities/{kind}/{name}/edit route."""
+    bible = load_bible(slug)
+    if bible.find_timeline_event(name) is None:
+        raise HTTPException(404, f"No timeline event named {name!r}")
+    if req.track_id is not None and bible.find_timeline_track(req.track_id) is None:
+        raise HTTPException(404, f"No timeline track with id {req.track_id!r}")
+    if req.refers_back_to is not None and bible.find_timeline_event(req.refers_back_to) is None:
+        raise HTTPException(404, f"No timeline event named {req.refers_back_to!r}")
+    try:
+        return bible.update_timeline_event(
+            name, track_id=req.track_id, chrono_order=req.chrono_order, refers_back_to=req.refers_back_to,
+        )
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@router.get("/api/projects/{slug}/timeline/tracks")
+def list_timeline_tracks(slug: str) -> list[dict[str, Any]]:
+    return load_bible(slug).list_timeline_tracks()
+
+
+@router.post("/api/projects/{slug}/timeline/tracks")
+@with_bible_lock
+def create_timeline_track(slug: str, req: NewTimelineTrackRequest) -> dict[str, Any]:
+    bible = load_bible(slug)
+    return bible.add_timeline_track(req.name, req.description, req.color)
+
+
+@router.post("/api/projects/{slug}/timeline/tracks/{track_id}")
+@with_bible_lock
+def update_timeline_track(slug: str, track_id: str, req: UpdateTimelineTrackRequest) -> dict[str, Any]:
+    bible = load_bible(slug)
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    try:
+        return bible.update_timeline_track(track_id, **fields)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@router.delete("/api/projects/{slug}/timeline/tracks/{track_id}")
+@with_bible_lock
+def delete_timeline_track(slug: str, track_id: str) -> dict[str, Any]:
+    bible = load_bible(slug)
+    try:
+        bible.delete_timeline_track(track_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    return {"deleted": track_id}
+
+
+@router.get("/api/projects/{slug}/timeline/crosspoints")
+def list_crosspoints(slug: str) -> list[dict[str, Any]]:
+    return load_bible(slug).list_crosspoints()
+
+
+@router.post("/api/projects/{slug}/timeline/crosspoints")
+@with_bible_lock
+def create_crosspoint(slug: str, req: NewCrosspointRequest) -> dict[str, Any]:
+    bible = load_bible(slug)
+    try:
+        return bible.add_crosspoint(req.from_event, req.to_event, req.type)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.delete("/api/projects/{slug}/timeline/crosspoints")
+@with_bible_lock
+def delete_crosspoint(slug: str, req: DeleteCrosspointRequest) -> dict[str, Any]:
+    bible = load_bible(slug)
+    try:
+        bible.delete_crosspoint(req.from_event, req.to_event, req.type)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    return {"deleted": True}
+
+
+@router.get("/api/projects/{slug}/timeline/chrono-view")
+def timeline_chrono_view(slug: str, track_id: str | None = None) -> dict[str, Any]:
+    return load_bible(slug).timeline_chrono_view(track_id)
 
 
 class CharacterSectionsRequest(BaseModel):

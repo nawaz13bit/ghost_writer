@@ -58,6 +58,41 @@ return an empty flags list when nothing is actually affected. Always respond
 with ONLY a single JSON object."""
 
 
+def _uses_chrono_timeline(bible: StoryBible) -> bool:
+    """True once a project actually places any event on a track/chronology -
+    stays False for every existing single-timeline project (galactic-follies
+    included), so the plain chapter/order rendering below is untouched for
+    them."""
+    return any(
+        t.get("track_id") is not None or t.get("chrono_order") is not None
+        for t in bible.data.get("timeline", [])
+    )
+
+
+def _chrono_timeline_section(bible: StoryBible) -> str:
+    """Chrono-grouped-by-track rendering of the timeline for the LLM prompt,
+    used instead of the flat chapter-order list once a project has any
+    track_id/chrono_order set, so the model reasons about in-world sequence
+    rather than drafting order."""
+    view = bible.timeline_chrono_view()
+    lines = []
+    for lane in view["lanes"]:
+        track = lane["track"]
+        lane_name = track["name"] if track else "(unassigned track)"
+        lines.append(f"-- Track: {lane_name} --")
+        for ev in lane["events"]:
+            chrono = ev.get("chrono_order")
+            chrono_tag = f"[chrono #{chrono}] " if chrono is not None else "[unplaced] "
+            reveal_tag = f" (reveals {ev['refers_back_to']!r})" if ev.get("refers_back_to") else ""
+            desc = ev.get("description") or ""
+            if len(desc) > ENTITY_EXCERPT_CHARS:
+                desc = desc[:ENTITY_EXCERPT_CHARS] + "..."
+            lines.append(f"  {chrono_tag}{ev['name']}{reveal_tag}: {desc}")
+    for cp in view["crosspoints"]:
+        lines.append(f"-- Crosspoint ({cp['type']}): {cp['from_event']} -> {cp['to_event']} --")
+    return "\n".join(lines) if lines else "(none)"
+
+
 class ContinuityCheckerAgent(Agent):
     system_prompt = SYSTEM_PROMPT
 
@@ -97,7 +132,9 @@ class ContinuityCheckerAgent(Agent):
         characters_section = section("character", truncate=ENTITY_EXCERPT_CHARS)
         world_section = section("world", truncate=ENTITY_EXCERPT_CHARS)
         notes_section = section("research", truncate=ENTITY_EXCERPT_CHARS)
-        timeline_section = section("timeline", truncate=ENTITY_EXCERPT_CHARS)
+        timeline_section = (
+            _chrono_timeline_section(bible) if _uses_chrono_timeline(bible) else section("timeline", truncate=ENTITY_EXCERPT_CHARS)
+        )
         scenes_section = section("scene")
         ideas_section = section("idea", truncate=ENTITY_EXCERPT_CHARS)
 
@@ -130,7 +167,11 @@ e.g. a fact the note records no longer holds):
 {notes_section}
 
 Timeline events (flag if this change contradicts an event's date/order, or
-means an event's description is now outdated):
+means an event's description is now outdated). When events are grouped by
+track and chrono order below, also flag any character who acts on, or refers
+to, knowledge from a chronologically-later event on any track unless that
+later event is linked back via an explicit "reveals" relationship - that
+kind of unearned foreknowledge is itself a continuity error:
 {timeline_section}
 
 Planned/drafted scenes within chapters (flag if this change means a scene's
@@ -319,7 +360,9 @@ if nothing is affected). Each object has:
 
         characters_section = brief(bible.data.get("characters", []))
         world_section = brief(bible.data.get("world", []))
-        timeline_section = brief(bible.data.get("timeline", []))
+        timeline_section = (
+            _chrono_timeline_section(bible) if _uses_chrono_timeline(bible) else brief(bible.data.get("timeline", []))
+        )
         notes_section = brief([
             {"name": n.get("name") or n.get("topic"), "description": n.get("content")}
             for n in bible.data.get("research_notes", [])
@@ -378,7 +421,9 @@ Characters bible:
 World bible:
 {world_section}
 
-Timeline events:
+Timeline events (when grouped by track/chrono order, also flag any character
+acting on knowledge from a chronologically-later event on any track unless
+linked back via an explicit "reveals" relationship):
 {timeline_section}
 
 Research notes:
@@ -549,3 +594,92 @@ Each flag object has:
             seen_entities.add(key)
             deduped.append(flag)
         return deduped
+
+    def check_timeline_paradoxes(self, bible: StoryBible) -> list[dict]:
+        """Pure-code structural check over the loopy-timeline (Pattern A) and
+        parallel-track (Pattern B) fields on timeline events - no LLM call,
+        so this runs cheaply on every finalize/sync alongside the existing
+        timeline_extractor proposal step. Two checks, both feeding the same
+        review-gated continuity_flags queue as the LLM-based check() above:
+
+        1. `refers_back_to` (a "reveal" event pointing at an earlier one it
+           explains) must point at an event with chrono_order <= its own -
+           a reveal can't refer back to something that happens later.
+        2. A `cause_effect` crosspoint's "from" event must have chrono_order
+           <= the "to" event's, since a cause can't follow its effect -
+           unless a matching `paradox_loop` crosspoint between the same two
+           events marks the loop as intentional.
+
+        Events/crosspoints missing chrono_order on either side are skipped -
+        there's nothing to contradict until both ends are actually placed on
+        a chronology."""
+        events_by_name = {t["name"]: t for t in bible.data.get("timeline", [])}
+        flags: list[dict] = []
+
+        for event in events_by_name.values():
+            ref_name = event.get("refers_back_to")
+            if not ref_name:
+                continue
+            ref_event = events_by_name.get(ref_name)
+            if ref_event is None:
+                continue
+            chrono = event.get("chrono_order")
+            ref_chrono = ref_event.get("chrono_order")
+            if chrono is None or ref_chrono is None:
+                continue
+            if ref_chrono > chrono:
+                flags.append({
+                    "kind": "timeline",
+                    "chapter_num": None,
+                    "target_name": event["name"],
+                    "drafted": False,
+                    "issue": (
+                        f"'{event['name']}' (chrono #{chrono}) refers back to '{ref_name}' "
+                        f"(chrono #{ref_chrono}), but that event is placed LATER in the "
+                        "in-world chronology - a reveal can't point at something that "
+                        "hasn't happened yet."
+                    ),
+                    "instruction": (
+                        f"Fix the chrono_order of '{event['name']}' and/or '{ref_name}' so the "
+                        "reveal points back at an earlier event, or update refers_back_to."
+                    ),
+                })
+
+        loop_exempted = set()
+        for cp in bible.data.get("timeline_crosspoints", []):
+            if cp.get("type") == "paradox_loop":
+                loop_exempted.add(frozenset((cp["from_event"], cp["to_event"])))
+
+        for cp in bible.data.get("timeline_crosspoints", []):
+            if cp.get("type") != "cause_effect":
+                continue
+            if frozenset((cp["from_event"], cp["to_event"])) in loop_exempted:
+                continue
+            from_event = events_by_name.get(cp["from_event"])
+            to_event = events_by_name.get(cp["to_event"])
+            if from_event is None or to_event is None:
+                continue
+            from_chrono = from_event.get("chrono_order")
+            to_chrono = to_event.get("chrono_order")
+            if from_chrono is None or to_chrono is None:
+                continue
+            if from_chrono > to_chrono:
+                flags.append({
+                    "kind": "timeline",
+                    "chapter_num": None,
+                    "target_name": from_event["name"],
+                    "drafted": False,
+                    "issue": (
+                        f"Cause-effect crosspoint says '{from_event['name']}' (chrono "
+                        f"#{from_chrono}) causes '{to_event['name']}' (chrono #{to_chrono}), "
+                        "but the cause is placed AFTER the effect in the in-world "
+                        "chronology."
+                    ),
+                    "instruction": (
+                        f"Fix the chrono_order of '{from_event['name']}' and/or "
+                        f"'{to_event['name']}', or add a paradox_loop crosspoint between "
+                        "them if this is an intentional time loop."
+                    ),
+                })
+
+        return flags

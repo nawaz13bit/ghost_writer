@@ -101,6 +101,49 @@ class Agent:
                 merged.extend(item for item in result if isinstance(item, dict))
         return merged
 
+    def timeline_digest(self, bible, max_chars: int = 40_000, track_id: str | None = None) -> str:
+        """Compact, cached summary of bible's full timeline for callers (like
+        author.py's draft prompts) that need every event's facts but can't
+        keep dumping the whole - unboundedly growing - timeline_brief() into
+        a single prose-generation call. Unlike ask_json_batched's map+merge,
+        a chapter draft is one prose call that can't be split into batches
+        and remerged, so this folds the timeline into a rolling summary via
+        ask_refine instead, and caches the result on the bible (keyed by
+        StoryBible.timeline_signature()) so it's rebuilt only when a
+        timeline event actually changes, not on every draft call.
+
+        track_id, if given (from the drafting outline entry's own track_id),
+        scopes the digest to that track's events plus any event linked to
+        them via a crosspoint on another track - keeps a multi-track book's
+        draft prompt focused on the cast/era actually being written, instead
+        of every parallel track's events. None (the default, and the only
+        path for every existing single-timeline project) keeps today's
+        whole-book behavior unchanged.
+
+        Deliberately not used by continuity/bible-sync callers - those need
+        the exact ground-truth timeline_brief(), not an LLM-compacted
+        approximation that could blur or drop a detail."""
+        cached = bible.get_timeline_digest(track_id)
+        if cached is not None:
+            return cached
+        events = bible.timeline_events_for_track(track_id) if track_id else None
+        lines = bible.timeline_event_lines(events)
+        if not lines:
+            digest = "(no timeline events defined yet)"
+        else:
+            def build_prompt(batch_text: str, prior_summary: str) -> str:
+                prior_block = f"Story-so-far timeline digest:\n{prior_summary}\n\n" if prior_summary else ""
+                return (
+                    f"{prior_block}New timeline events to fold in:\n{batch_text}\n\n"
+                    "Rewrite the digest to include every fact from both the prior digest and "
+                    "the new events - dates, chapter numbers, characters, locations, "
+                    "consequences. Keep every event, just phrase compactly. Output ONLY the "
+                    "updated digest, one line per event, no commentary."
+                )
+            digest = self.ask_refine(lines, build_prompt, max_chars=max_chars)
+        bible.set_timeline_digest(digest, track_id)
+        return digest
+
     def ask_refine(
         self,
         items: list[str],

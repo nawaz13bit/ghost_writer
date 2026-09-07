@@ -9,7 +9,7 @@ import {
   migrateImportNotes, planScenesWithAI,
   loadLlmModels, loadLlmFolders, saveLlmFolders, openReviseOutlineModal, pollLlmStatus, renameEntity, reviseEngine, generateBlurb,
   reviseWithInstruction, runUniversalPrompt, saveAllCharacterSections, saveCharacterFactions, addCharacterReveal, suggestCharacterReveal, filterIdeaRelatesTo, saveIdea, saveManualEdit, savePrompt,
-  clearTimelineConsequence, saveTimelineConsequence, saveWorldCategory, saveWorldIsReal, saveWorldObjects,
+  clearTimelineConsequence, saveTimelineConsequence, saveTimelinePlacement, addTimelineCrosspoint, saveWorldCategory, saveWorldIsReal, saveWorldObjects,
   setPaneView, showPromptFor, showReviseOutlineStep, skipRemainingUniversalTasks,
   startLlm, stopLlm, switchModel, suggestEntity, suggestOutlineEntry,
   setUniversalMode, clearUniversalDiscuss, useDiscussSuggestion, translateBook,
@@ -217,6 +217,9 @@ $("wr-is-real").addEventListener("change", saveWorldIsReal);
 wireClick("wc-category-save", saveWorldCategory);
 wireClick("tc-save", saveTimelineConsequence);
 wireClick("tc-clear", clearTimelineConsequence);
+wireClick("tp-save", saveTimelinePlacement);
+wireClick("tp-cp-add", addTimelineCrosspoint);
+$("btn-timeline-close").addEventListener("click", () => setActiveTab("manuscript"));
 wireClick("btn-universal-go", runUniversalPrompt);
 wireClick("btn-universal-mode-do", () => setUniversalMode("do"));
 wireClick("btn-universal-mode-discuss", () => setUniversalMode("discuss"));

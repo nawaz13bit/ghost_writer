@@ -8,6 +8,7 @@ import { $, state } from "./api.js";
 import { closeDrawer, loadPrompts, loadTranslateLanguages, selectItem } from "./editor.js";
 import { renderManuscript } from "./manuscript.js";
 import { showSidebar, hideSidebar } from "./sidebar.js";
+import { renderTimelineTab } from "./timeline_swimlane.js";
 
 let activeTab = "manuscript";
 
@@ -20,6 +21,7 @@ export function hideTabBar() {
   $("empty-state").classList.remove("hidden");
   $("manuscript-view").classList.add("hidden");
   $("tab-panel-settings").classList.add("hidden");
+  $("tab-panel-timeline").classList.add("hidden");
   hideSidebar();
   activeTab = "manuscript";
 }
@@ -31,6 +33,7 @@ function applyTab() {
 
   $("manuscript-view").classList.add("hidden");
   $("tab-panel-settings").classList.add("hidden");
+  $("tab-panel-timeline").classList.add("hidden");
   closeDrawer();
   hideSidebar();
 
@@ -53,6 +56,9 @@ function applyTab() {
   } else if (activeTab === "continuity") {
     showSidebar();
     selectItem("overview", "continuity");
+  } else if (activeTab === "timeline") {
+    $("tab-panel-timeline").classList.remove("hidden");
+    renderTimelineTab();
   } else if (activeTab === "settings") {
     $("tab-panel-settings").classList.remove("hidden");
     loadPrompts().catch(() => {});

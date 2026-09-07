@@ -43,7 +43,11 @@ class AuthorAgent(Agent):
         act_section = f"\nCurrent act ({entry['act']}) summary: {act['summary']}\n" if act and act.get("summary") else ""
 
         timeline = bible.data.get("timeline") or []
-        timeline_section = f"\nStory timeline (for chronology - do not contradict):\n{bible.timeline_brief()}\n" if timeline else ""
+        timeline_section = (
+            f"\nStory timeline (for chronology - do not contradict):\n"
+            f"{self.timeline_digest(bible, track_id=entry.get('track_id'))}\n"
+            if timeline else ""
+        )
 
         neighbors_section = (
             f"\nOther chapters featuring this chapter's characters (may be earlier OR later in "
@@ -146,7 +150,11 @@ Write the full chapter prose now."""
         act_section = f"\nCurrent act ({entry['act']}) summary: {act['summary']}\n" if act and act.get("summary") else ""
 
         timeline = bible.data.get("timeline") or []
-        timeline_section = f"\nStory timeline (for chronology - do not contradict):\n{bible.timeline_brief()}\n" if timeline else ""
+        timeline_section = (
+            f"\nStory timeline (for chronology - do not contradict):\n"
+            f"{self.timeline_digest(bible, track_id=entry.get('track_id'))}\n"
+            if timeline else ""
+        )
 
         neighbors_section = (
             f"\nOther chapters featuring this chapter's characters (may be earlier OR later in "

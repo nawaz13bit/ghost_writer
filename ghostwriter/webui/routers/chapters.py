@@ -328,6 +328,12 @@ def _run_finalize_job(job_id: str, slug: str, chapter_num: int, history_id: int)
         except Exception as exc:
             sync_errors.append(f"Timeline sync: {exc}")
         try:
+            paradox_flags = continuity_checker.check_timeline_paradoxes(bible)
+            if paradox_flags:
+                bible.add_continuity_flags(paradox_flags)
+        except Exception as exc:
+            sync_errors.append(f"Timeline paradox check: {exc}")
+        try:
             job["thread_proposals"] = thread_planner.propose_from_chapter(bible, chapter_num, polished)
         except Exception as exc:
             sync_errors.append(f"Thread sync: {exc}")
@@ -444,6 +450,13 @@ def _run_bible_sync_job(job_id: str, slug: str, chapter_num: int) -> None:
         except Exception as exc:
             logger.exception("Timeline sync failed for project %r chapter %r", slug, chapter_num)
             errors.append(f"Timeline sync: {exc}")
+        try:
+            paradox_flags = continuity_checker.check_timeline_paradoxes(bible)
+            if paradox_flags:
+                bible.add_continuity_flags(paradox_flags)
+        except Exception as exc:
+            logger.exception("Timeline paradox check failed for project %r chapter %r", slug, chapter_num)
+            errors.append(f"Timeline paradox check: {exc}")
         advance("thread_sync")
         try:
             job["thread_proposals"] = thread_planner.propose_from_chapter(bible, chapter_num, text)

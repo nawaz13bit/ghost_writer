@@ -10,6 +10,7 @@ import json
 import os
 import re
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -113,6 +114,9 @@ class StoryBible:
             "chapters": [],
             "ideas": [],
             "timeline": [],
+            "timeline_digest_cache": None,
+            "timeline_tracks": [],
+            "timeline_crosspoints": [],
             "canvas_layout": {},
             "research_done": False,
             "world_built": False,
@@ -174,6 +178,15 @@ class StoryBible:
         data.setdefault("foreword", "")
         data.setdefault("acknowledgments", "")
         data.setdefault("about_author", "")
+        data.setdefault("timeline_digest_cache", None)
+        data.setdefault("timeline_tracks", [])
+        data.setdefault("timeline_crosspoints", [])
+        for event in data.get("timeline", []):
+            event.setdefault("track_id", None)
+            event.setdefault("chrono_order", None)
+            event.setdefault("refers_back_to", None)
+        for entry in data.get("outline", []):
+            entry.setdefault("track_id", None)
         for note in data.get("research_notes", []):
             note.setdefault("sources", [])
             note.setdefault("id", slugify(note.get("name") or note.get("topic") or ""))
@@ -339,6 +352,9 @@ class StoryBible:
         consequence: dict[str, str] | None = None,
         characters: list[str] | None = None,
         locations: list[str] | None = None,
+        track_id: str | None = None,
+        chrono_order: int | None = None,
+        refers_back_to: str | None = None,
     ) -> dict[str, Any]:
         """`consequence`, if given, is `{"character": name, "status": "dead"}`
         (or any freeform status) - a status change that, when this book joins
@@ -347,7 +363,13 @@ class StoryBible:
         given, tags which characters this event involves, and `locations`
         tags which world entries (faction/location/object/item) it involves -
         lets the character/world editors show "events involving this entry"
-        as a derived view without a separate structured event log per entry."""
+        as a derived view without a separate structured event log per entry.
+        `track_id` scopes the event to a cast/era (None = the single implicit
+        "main" track, i.e. today's behavior). `chrono_order` is the event's
+        in-world sequence number, independent of chapter_num/order (which are
+        drafting/manuscript order) - None means the event isn't placed on a
+        chronology yet. `refers_back_to` names an earlier (in chrono terms)
+        event this one reveals/explains, for flashback/loop structures."""
         if order is None:
             order = max((t.get("order", 0) for t in self.data["timeline"]), default=0) + 1
         event = {
@@ -355,6 +377,8 @@ class StoryBible:
             "chapter_num": chapter_num, "order": order, "created_at": time.time(),
             "consequence": consequence, "characters": characters or [],
             "locations": locations or [],
+            "track_id": track_id, "chrono_order": chrono_order,
+            "refers_back_to": refers_back_to,
         }
         self.data["timeline"].append(event)
         self.save()
@@ -374,6 +398,84 @@ class StoryBible:
         event.update(fields)
         self.save()
         return event
+
+    # -- Timeline tracks (Pattern B: parallel casts/eras) -------------------
+    # A small registry so tracks can be named/colored in the UI rather than
+    # just raw track_id strings; deleting a track never orphans its events -
+    # they fall back to track_id=None (the implicit "main" track).
+
+    def add_timeline_track(
+        self, name: str, description: str = "", color: str | None = None,
+    ) -> dict[str, Any]:
+        track_id = str(uuid.uuid4())
+        track = {"id": track_id, "name": name, "description": description, "color": color}
+        self.data.setdefault("timeline_tracks", []).append(track)
+        self.save()
+        return track
+
+    def list_timeline_tracks(self) -> list[dict[str, Any]]:
+        return self.data.get("timeline_tracks", [])
+
+    def find_timeline_track(self, track_id: str) -> dict[str, Any] | None:
+        for t in self.data.get("timeline_tracks", []):
+            if t["id"] == track_id:
+                return t
+        return None
+
+    def update_timeline_track(self, track_id: str, **fields: Any) -> dict[str, Any]:
+        track = self.find_timeline_track(track_id)
+        if track is None:
+            raise ValueError(f"No timeline track with id {track_id!r}")
+        track.update(fields)
+        self.save()
+        return track
+
+    def delete_timeline_track(self, track_id: str) -> None:
+        if self.find_timeline_track(track_id) is None:
+            raise ValueError(f"No timeline track with id {track_id!r}")
+        self.data["timeline_tracks"] = [
+            t for t in self.data.get("timeline_tracks", []) if t["id"] != track_id
+        ]
+        for event in self.data.get("timeline", []):
+            if event.get("track_id") == track_id:
+                event["track_id"] = None
+        self.save()
+
+    # -- Timeline crosspoints (Pattern B: cross-track links) -----------------
+    # Typed edges between events on different tracks, used by the continuity
+    # checker's paradox check and drawn as connecting lines in the swimlane
+    # view. Kept as a flat list rather than nested under events since a
+    # crosspoint conceptually belongs to neither event alone.
+
+    CROSSPOINT_TYPES = ("cause_effect", "shared_location", "shared_object", "paradox_loop")
+
+    def add_crosspoint(self, from_event: str, to_event: str, type: str) -> dict[str, Any]:
+        if type not in self.CROSSPOINT_TYPES:
+            raise ValueError(f"Unknown crosspoint type {type!r}")
+        if self.find_timeline_event(from_event) is None:
+            raise ValueError(f"No timeline event named {from_event!r}")
+        if self.find_timeline_event(to_event) is None:
+            raise ValueError(f"No timeline event named {to_event!r}")
+        crosspoint = {
+            "from_event": from_event, "to_event": to_event, "type": type,
+            "created_at": time.time(),
+        }
+        self.data.setdefault("timeline_crosspoints", []).append(crosspoint)
+        self.save()
+        return crosspoint
+
+    def list_crosspoints(self) -> list[dict[str, Any]]:
+        return self.data.get("timeline_crosspoints", [])
+
+    def delete_crosspoint(self, from_event: str, to_event: str, type: str) -> None:
+        before = len(self.data.get("timeline_crosspoints", []))
+        self.data["timeline_crosspoints"] = [
+            c for c in self.data.get("timeline_crosspoints", [])
+            if not (c["from_event"] == from_event and c["to_event"] == to_event and c["type"] == type)
+        ]
+        if len(self.data["timeline_crosspoints"]) == before:
+            raise ValueError("No matching crosspoint found")
+        self.save()
 
     def set_outline(self, chapters: list[dict[str, Any]]) -> None:
         self.data["outline"] = chapters
@@ -404,12 +506,14 @@ class StoryBible:
         outline: str = "",
         characters: list[str] | None = None,
         world_refs: list[str] | None = None,
+        track_id: str | None = None,
     ) -> dict[str, Any]:
         if self.outline_entry(chapter_num) is not None:
             raise ValueError(f"Outline entry for chapter {chapter_num} already exists")
         entry = {
             "chapter_num": chapter_num, "title": title, "summary": summary, "act": act,
             "outline": outline, "characters": characters or [], "world_refs": world_refs or [],
+            "track_id": track_id,
         }
         self.data["outline"].append(entry)
         self.data["outline"].sort(key=lambda o: o["chapter_num"])
@@ -1204,17 +1308,45 @@ class StoryBible:
             lines.append(f"- {w['name']} [{w['category']}]{real_tag}{objects_tag}: {w['content']}")
         return "\n".join(lines) if lines else "(no world-building notes yet)"
 
-    def timeline_brief(self) -> str:
-        # Sort by the event's place in the book (chapter_num), not by the
-        # order events happened to be extracted/added in - chapters are often
-        # drafted out of sequence, so an event from a later-in-story chapter
-        # drafted first must not appear before an earlier chapter's events
-        # drafted afterward. Undated/no-chapter events (e.g. manually-added
-        # backstory) sort first; "order" only breaks ties within a chapter.
-        events = sorted(
-            self.data.get("timeline", []),
-            key=lambda t: (t.get("chapter_num") if t.get("chapter_num") is not None else -1, t.get("order", 0)),
+    def _timeline_sort_key(self, t: dict[str, Any]) -> tuple:
+        # Groups events by track (None/"main" first) then by chrono_order when
+        # set - the in-world sequence, which can differ from drafting order
+        # (flashbacks, time loops). Events without chrono_order fall back to
+        # the original (chapter_num, order) drafting-order sort: chapters are
+        # often drafted out of sequence, so an event from a later-in-story
+        # chapter drafted first must not appear before an earlier chapter's
+        # events drafted afterward. Undated/no-chapter events sort first;
+        # "order" only breaks ties within a chapter.
+        chrono = t.get("chrono_order")
+        return (
+            t.get("track_id") or "",
+            0 if chrono is not None else 1,
+            chrono if chrono is not None else 0,
+            t.get("chapter_num") if t.get("chapter_num") is not None else -1,
+            t.get("order", 0),
         )
+
+    def timeline_events_for_track(self, track_id: str) -> list[dict[str, Any]]:
+        """Events belonging to the given track, plus any event on another
+        track connected to one of them via a crosspoint - a crosspoint is
+        precisely the reason two tracks intersect, so the connected event's
+        facts are relevant even though it lives on a different track. Used
+        to scope draft-time timeline injection (Agent.timeline_digest) to an
+        outline entry's track instead of the whole book."""
+        events = self.data.get("timeline", [])
+        own = [e for e in events if e.get("track_id") == track_id]
+        own_names = {e["name"] for e in own}
+        linked_names: set[str] = set()
+        for cp in self.data.get("timeline_crosspoints", []):
+            if cp["from_event"] in own_names:
+                linked_names.add(cp["to_event"])
+            elif cp["to_event"] in own_names:
+                linked_names.add(cp["from_event"])
+        linked = [e for e in events if e["name"] in linked_names and e.get("track_id") != track_id]
+        return own + linked
+
+    def timeline_event_lines(self, events: list[dict[str, Any]] | None = None) -> list[str]:
+        events = sorted(events if events is not None else self.data.get("timeline", []), key=self._timeline_sort_key)
         lines = []
         for t in events:
             date = t.get("story_date") or "(undated)"
@@ -1223,11 +1355,98 @@ class StoryBible:
             chars_tag = f" [Characters: {', '.join(chars)}]" if chars else ""
             locs = t.get("locations") or []
             locs_tag = f" [Locations: {', '.join(locs)}]" if locs else ""
-            lines.append(f"- {date}: {t['name']}{chapter_tag}{chars_tag}{locs_tag} - {t.get('description', '')}")
+            track = self.find_timeline_track(t["track_id"]) if t.get("track_id") else None
+            track_tag = f" [Track: {track['name']}]" if track else ""
+            chrono_tag = f" [Chrono #{t['chrono_order']}]" if t.get("chrono_order") is not None else ""
+            lines.append(
+                f"- {date}: {t['name']}{chapter_tag}{track_tag}{chrono_tag}{chars_tag}{locs_tag} - {t.get('description', '')}"
+            )
+        return lines
+
+    def timeline_brief(self) -> str:
+        lines = self.timeline_event_lines()
         return "\n".join(lines) if lines else "(no timeline events defined yet)"
 
+    def timeline_chrono_view(self, track_id: str | None = None) -> dict[str, Any]:
+        """Structured timeline for the swimlane UI: events grouped by track
+        (sorted by chrono_order, undated-chrono events last) plus the
+        crosspoints connecting them. Distinct from timeline_brief(), which is
+        prompt-facing prose text."""
+        tracks = self.list_timeline_tracks()
+        events = self.data.get("timeline", [])
+        if track_id is not None:
+            events = [e for e in events if e.get("track_id") == track_id]
+
+        def chrono_key(t: dict[str, Any]) -> tuple:
+            chrono = t.get("chrono_order")
+            return (0 if chrono is not None else 1, chrono if chrono is not None else 0)
+
+        by_track: dict[str | None, list[dict[str, Any]]] = {}
+        for e in sorted(events, key=chrono_key):
+            by_track.setdefault(e.get("track_id"), []).append(e)
+
+        lanes = []
+        for t in tracks:
+            if track_id is not None and t["id"] != track_id:
+                continue
+            lanes.append({"track": t, "events": by_track.get(t["id"], [])})
+        if None in by_track and (track_id is None):
+            lanes.append({"track": None, "events": by_track[None]})
+
+        return {"lanes": lanes, "crosspoints": self.list_crosspoints()}
+
+    def timeline_signature(self, events: list[dict[str, Any]] | None = None) -> str:
+        """Stable fingerprint of the current timeline event set - used by
+        get_timeline_digest/set_timeline_digest to tell whether a cached
+        digest (see agents/base.py's Agent.timeline_digest) is stale.
+        Content-based rather than a simple len() check so an edited or
+        deleted event also invalidates the cache, not just an added one."""
+        import hashlib
+        events = sorted(
+            events if events is not None else self.data.get("timeline", []),
+            key=lambda t: (t.get("name", ""), t.get("chapter_num") or -1),
+        )
+        fingerprint = json.dumps(
+            [[t.get("name"), t.get("story_date"), t.get("chapter_num"), t.get("description"),
+              t.get("characters"), t.get("locations"), t.get("track_id"), t.get("chrono_order"),
+              t.get("refers_back_to")] for t in events],
+            sort_keys=True,
+        )
+        return hashlib.md5(fingerprint.encode("utf-8")).hexdigest()
+
+    def get_timeline_digest(self, track_id: str | None = None) -> str | None:
+        """Returns the cached compact timeline digest if one exists and still
+        matches the current timeline_signature(), else None to tell the
+        caller (Agent.timeline_digest) it must rebuild it. track_id scopes
+        both the cache slot and the signature to one track's (plus its
+        crosspoint-linked) events, kept separate from the whole-book cache
+        (key None) so a track-scoped draft prompt never sees a stale
+        whole-book digest or vice versa."""
+        cache_key = track_id or "__all__"
+        cache = self.data.get("timeline_digest_cache")
+        if not isinstance(cache, dict) or cache_key not in cache:
+            return None
+        entry = cache[cache_key]
+        events = self.timeline_events_for_track(track_id) if track_id else None
+        if entry.get("signature") != self.timeline_signature(events):
+            return None
+        return entry["text"]
+
+    def set_timeline_digest(self, text: str, track_id: str | None = None) -> None:
+        cache_key = track_id or "__all__"
+        cache = self.data.get("timeline_digest_cache")
+        if not isinstance(cache, dict):
+            cache = {}
+        events = self.timeline_events_for_track(track_id) if track_id else None
+        cache[cache_key] = {"signature": self.timeline_signature(events), "text": text}
+        self.data["timeline_digest_cache"] = cache
+        self.save()
+
+    def research_note_lines(self) -> list[str]:
+        return [f"- {n['topic']}: {n['content']}" for n in self.data["research_notes"]]
+
     def research_brief(self) -> str:
-        lines = [f"- {n['topic']}: {n['content']}" for n in self.data["research_notes"]]
+        lines = self.research_note_lines()
         return "\n".join(lines) if lines else "(no research notes yet)"
 
     def full_synopsis_brief(self) -> str:
