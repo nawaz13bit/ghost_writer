@@ -7,6 +7,12 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "config.yaml"
+# Personal machine settings (llama server/model folders) live here instead of
+# config.yaml, so each person who clones the repo keeps their own folders in
+# a file that's gitignored and never fought over / overwritten by others'
+# settings. Optional: if absent, config.yaml's own llama block (or the
+# models/ auto-discovery below) is used as-is.
+LOCAL_CONFIG_PATH = REPO_ROOT / "config.local.yaml"
 MODELS_DIR = REPO_ROOT / "models"
 
 
@@ -68,6 +74,14 @@ def load_config(path: Path | None = None) -> dict:
     cfg["paths"]["series_dir"] = str(series_path)
 
     llama = cfg.setdefault("llama", {})
+
+    # config.local.yaml (gitignored, personal) overrides config.yaml's llama
+    # block field-by-field, so this machine's folders/model choice never need
+    # to touch the shared config.yaml.
+    if LOCAL_CONFIG_PATH.is_file():
+        with open(LOCAL_CONFIG_PATH, "r", encoding="utf-8") as f:
+            local_cfg = yaml.safe_load(f) or {}
+        llama.update(local_cfg.get("llama", {}))
 
     # models/ is checked first so a dropped-in llama.cpp build + model just
     # works with no config.yaml edits; anything not found there falls back
@@ -137,16 +151,35 @@ def available_models(cfg: dict) -> list[dict]:
     return models
 
 
+def _ensure_local_config() -> None:
+    """Creates config.local.yaml (gitignored, this machine's own llama
+    folders/model choice) from its template on first write, so set_model/
+    set_folders always have a file to targeted-replace into rather than
+    touching the shared config.yaml."""
+    if LOCAL_CONFIG_PATH.is_file():
+        return
+    template = REPO_ROOT / "config.local.yaml.example"
+    if template.is_file():
+        LOCAL_CONFIG_PATH.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        LOCAL_CONFIG_PATH.write_text(
+            'llama:\n  server_exe: ""\n  model_path: ""\n  draft_model_path: ""\n',
+            encoding="utf-8",
+        )
+
+
 def set_model(model_path: str, draft_model_path: str | None = "") -> None:
     """Persists a new model_path (and, unless draft_model_path is left as the
-    default "", a new/cleared draft_model_path) into config.yaml with a
+    default "", a new/cleared draft_model_path) into config.local.yaml (this
+    machine's personal, gitignored settings - see LOCAL_CONFIG_PATH) with a
     targeted line-level regex replace rather than a full YAML re-dump, so the
-    file's extensive hand-written comments survive. draft_model_path="" (the
+    file's hand-written comments survive. draft_model_path="" (the
     default) leaves that line untouched; pass None to clear it (commented
     out) or a path string to set it - callers should clear it when switching
     away from the model family the current draft/MTP file was built for,
     since a mismatched draft model will misbehave or crash the server."""
-    text = CONFIG_PATH.read_text(encoding="utf-8")
+    _ensure_local_config()
+    text = LOCAL_CONFIG_PATH.read_text(encoding="utf-8")
 
     escaped = model_path.replace("\\", "\\\\")
     text, n = re.subn(
@@ -157,7 +190,7 @@ def set_model(model_path: str, draft_model_path: str | None = "") -> None:
         flags=re.MULTILINE,
     )
     if n == 0:
-        raise ValueError("config.yaml has no model_path line to update")
+        raise ValueError("config.local.yaml has no model_path line to update")
 
     if draft_model_path != "":
         if draft_model_path:
@@ -178,7 +211,7 @@ def set_model(model_path: str, draft_model_path: str | None = "") -> None:
                 flags=re.MULTILINE,
             )
 
-    CONFIG_PATH.write_text(text, encoding="utf-8")
+    LOCAL_CONFIG_PATH.write_text(text, encoding="utf-8")
 
 
 def _set_or_clear_key(text: str, key: str, value: str | None) -> str:
@@ -218,11 +251,13 @@ def _set_or_clear_key(text: str, key: str, value: str | None) -> str:
 
 
 def set_folders(llama_cpp_dir: str | None, models_dir: str | None) -> None:
-    """Persists the Settings > Local LLM > Folders fields into config.yaml:
-    llama_cpp_dir (folder to search for llama-server.exe) and models_dir (an
-    extra folder for available_models() to scan for .gguf files), each
-    independently settable/clearable."""
-    text = CONFIG_PATH.read_text(encoding="utf-8")
+    """Persists the Settings > Local LLM > Folders fields into config.local.
+    yaml (this machine's personal, gitignored settings - see
+    LOCAL_CONFIG_PATH): llama_cpp_dir (folder to search for llama-server.exe)
+    and models_dir (an extra folder for available_models() to scan for .gguf
+    files), each independently settable/clearable."""
+    _ensure_local_config()
+    text = LOCAL_CONFIG_PATH.read_text(encoding="utf-8")
     text = _set_or_clear_key(text, "llama_cpp_dir", llama_cpp_dir)
     text = _set_or_clear_key(text, "models_dir", models_dir)
-    CONFIG_PATH.write_text(text, encoding="utf-8")
+    LOCAL_CONFIG_PATH.write_text(text, encoding="utf-8")

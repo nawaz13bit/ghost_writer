@@ -105,8 +105,9 @@
         </label>
         <button id="btn-save-llm-folders" title="Requires the LLM server to be stopped first">Save Folders</button>
       </div>
-      <p class="modal-hint">Leave a field blank to fall back to config.yaml / the repo's own
-        <code>models/</code> folder. Changes take effect on the next server start.</p>
+      <p class="modal-hint">Leave a field blank to fall back to config.local.yaml / the repo's own
+        <code>models/</code> folder. Saved to config.local.yaml (personal, gitignored) so this
+        doesn't overwrite anyone else's folders. Changes take effect on the next server start.</p>
     </section>
 
     <section class="settings-section">

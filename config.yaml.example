@@ -1,10 +1,13 @@
 # ghost_writer configuration
-# Copy this file to config.yaml and adjust paths for your machine.
+# Copy this file to config.yaml and adjust for your machine.
+#
+# Your llama.cpp folders (server_exe/model_path/draft_model_path/
+# llama_cpp_dir/models_dir) go in config.local.yaml instead - see
+# config.local.yaml.example. That file is gitignored, so if more than one
+# person works from this repo, everyone keeps their own model folders there
+# without touching this shared config.yaml.
 
 llama:
-  server_exe: "C:\\path\\to\\llama-server.exe"
-  model_path: "C:\\path\\to\\models\\your-model.gguf"
-  draft_model_path: ""
   spec_type: "none"
   host: "127.0.0.1"
   port: 8080

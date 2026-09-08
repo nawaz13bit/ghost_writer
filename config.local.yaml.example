@@ -1,0 +1,18 @@
+# Personal machine settings - your own llama.cpp build and model folders.
+#
+# Copy this file to config.local.yaml and fill in your own paths. It is
+# gitignored, so each person working from this repo keeps their own folders
+# here without touching the shared config.yaml or stepping on anyone else's
+# settings. Anything set here overrides the matching field in config.yaml's
+# llama: block; anything left out falls back to config.yaml / the repo's
+# models/ auto-discovery.
+
+llama:
+  server_exe: "C:\\path\\to\\llama-server.exe"
+  model_path: "C:\\path\\to\\models\\your-model.gguf"
+  draft_model_path: ""
+  # llama_cpp_dir: folder to search for llama-server.exe (alternative to
+  # setting server_exe directly).
+  # llama_cpp_dir: "C:\\path\\to\\llama.cpp-build"
+  # models_dir: extra folder for the model-switcher to scan for .gguf files.
+  # models_dir: "C:\\path\\to\\models"

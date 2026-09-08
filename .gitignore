@@ -19,6 +19,7 @@ webui_verify.log
 
 # --- Local machine config (absolute local paths; keep an example instead) ---
 config.yaml
+config.local.yaml
 
 # --- Python ---
 __pycache__/

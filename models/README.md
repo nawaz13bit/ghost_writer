@@ -8,7 +8,8 @@ Drop-in location for a local llama.cpp build and model file(s).
   or "mtp") for speculative decoding
 
 `ghostwriter/config.py` checks this folder first (recursively) and uses
-whatever it finds here in place of `config.yaml`'s `llama.server_exe` /
+whatever it finds here in place of `config.local.yaml`'s `llama.server_exe` /
 `llama.model_path` / `llama.draft_model_path`. If this folder is empty, the
-paths configured in `config.yaml` are used unchanged - so nothing here is
-required, it's just a convenient default location.
+paths configured in `config.local.yaml` (personal, gitignored - see
+`config.local.yaml.example` in the repo root) are used unchanged - so nothing
+here is required, it's just a convenient default location.
