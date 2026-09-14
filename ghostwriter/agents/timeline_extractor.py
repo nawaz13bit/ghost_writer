@@ -107,3 +107,62 @@ with ONLY a JSON array like:
                 "chapter_num": chapter_num,
             })
         return proposals
+
+    def propose_retirements(self, bible: StoryBible, chapter_num: int, text: str) -> list[dict]:
+        """Catches the mirror-image gap propose_from_chapter leaves open: if a
+        chapter gets revised in a way that removes or contradicts an event the
+        bible already recorded FOR THAT CHAPTER, nothing today notices - the
+        stale timeline entry just sits there and keeps tripping false
+        continuity flags against later chapters until a writer manually
+        deletes it (see project_ghostwriter_timeline_staleness_gap). Only
+        checks entries already tagged with this chapter_num, since an event
+        logged against a different chapter isn't this revision's business to
+        judge, and it isn't a general "does the whole timeline still hold"
+        audit - that's check_book()'s job.
+
+        Returns proposals for the writer to review - does not touch the
+        bible. Each item: {name, reason, chapter_num}."""
+        entries = [e for e in bible.data.get("timeline", []) if e.get("chapter_num") == chapter_num]
+        if not entries:
+            return []
+
+        listing = "\n".join(f"- {e['name']}: {e.get('description', '')}" for e in entries)
+        prompt = f"""These timeline events were previously logged as established by
+Chapter {chapter_num}:
+{listing}
+
+--- CURRENT CHAPTER {chapter_num} TEXT ---
+{text}
+--- END CHAPTER ---
+
+The chapter text above may have since been revised. For each listed event
+that this text NO LONGER supports - it was removed, changed, or now
+contradicts what the text says happened - respond with an object giving its
+exact name and a short reason. Events the text still supports (even if
+worded differently) should be left out. Respond with ONLY a JSON array like:
+[{{"name": "...", "reason": "..."}}, ...] or [] if every event still holds."""
+
+        results = self.ask_json(prompt)
+        if not isinstance(results, list):
+            return []
+
+        known = {e["name"].lower(): e["name"] for e in entries}
+        seen: set[str] = set()
+        retirements = []
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            name = r.get("name")
+            if not isinstance(name, str):
+                continue
+            canonical = known.get(name.strip().lower())
+            if not canonical or canonical.lower() in seen:
+                continue
+            seen.add(canonical.lower())
+            reason = r.get("reason")
+            retirements.append({
+                "name": canonical,
+                "reason": reason.strip() if isinstance(reason, str) and reason.strip() else "No longer supported by the revised chapter text.",
+                "chapter_num": chapter_num,
+            })
+        return retirements

@@ -586,7 +586,7 @@ export function renderEditor() {
     return;
   }
   if (kind === "overview") {
-    $("editor-title").textContent = id === "continuity" ? "Master Bible / Continuity" : id === "bibliography" ? "Bibliography" : id === "critique" ? "Critique" : "Progress Tracker";
+    $("editor-title").textContent = id === "continuity" ? "Master Bible / Continuity" : id === "bibliography" ? "Bibliography" : id === "critique" ? "Critique" : id === "ideas" ? "Idea Sweep" : id === "research" ? "Research Sweep" : "Progress Tracker";
     $("editor-actions").innerHTML = "";
     clearOverflow();
     showEditorBody("overview");
@@ -1542,7 +1542,7 @@ export async function saveManualEdit() {
   renderEditor();
   if (kind === "chapter") refreshChapterMeta(id);
   markTouched(kind, id, kind === "chapter" ? `Chapter ${id}` : `${kindLabel(kind)}: ${id}`);
-  const queued = finalizeJob && queueBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals, finalizeJob.thread_proposals, finalizeJob.resolve_proposals);
+  const queued = finalizeJob && queueBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals, finalizeJob.thread_proposals, finalizeJob.resolve_proposals, finalizeJob.timeline_retirements);
   if (queued) {
     const first = state.universalQueue[0];
     const errNote = finalizeJob.error ? ` (finalize hit an error partway through: ${finalizeJob.error}, but earlier-step updates are still queued below)` : "";
@@ -1619,20 +1619,31 @@ async function approveSelected(kind, record, selectedEntry) {
     renderSidebar();
     integratedIdeaNote = ` Idea "${ideaTitle}" marked resolved.`;
   }
-  const queued = finalizeJob && queueBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals, finalizeJob.thread_proposals, finalizeJob.resolve_proposals);
-  if (queued) {
-    const first = state.universalQueue[0];
-    const errNote = finalizeJob.error ? ` (finalize hit an error partway through: ${finalizeJob.error}, but earlier-step updates are still queued below)` : "";
-    setStatus(`Finalized. Found ${state.universalQueue.length} update${state.universalQueue.length === 1 ? "" : "s"} to review - starting with ${describeUniversalTask(first)}.${errNote}${integratedIdeaNote}`, !!finalizeJob.error);
-    try {
-      await dispatchUniversalTask(first);
-    } finally {
-      updateUniversalQueueBar();
-    }
-  } else if (finalizeJob && finalizeJob.error) {
-    setStatus(`Finalize hit an error: ${finalizeJob.error}`, true);
+  if (finalizeJob && bulkAutoSaveMode) {
+    // Whole-book bulk pass (fixAllContinuityFlags/fixAllChapterContinuityIssues/
+    // finalizeOpenChapters): apply these fact-extraction proposals directly
+    // instead of queuing them for review, so the batch doesn't stop here - the
+    // writer's own manual, chapter-by-chapter approve (below) keeps the gate.
+    const applied = await autoApplyBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals, finalizeJob.thread_proposals, finalizeJob.resolve_proposals, finalizeJob.timeline_retirements);
+    const errNote = finalizeJob.error ? ` (finalize hit an error partway through: ${finalizeJob.error})` : "";
+    const appliedNote = applied ? ` ${applied} bible/timeline update${applied === 1 ? "" : "s"} applied.` : "";
+    setStatus(`Finalized.${appliedNote}${errNote}${integratedIdeaNote}`, !!finalizeJob.error);
   } else {
-    setStatus(`Finalized.${integratedIdeaNote}`);
+    const queued = finalizeJob && queueBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals, finalizeJob.thread_proposals, finalizeJob.resolve_proposals, finalizeJob.timeline_retirements);
+    if (queued) {
+      const first = state.universalQueue[0];
+      const errNote = finalizeJob.error ? ` (finalize hit an error partway through: ${finalizeJob.error}, but earlier-step updates are still queued below)` : "";
+      setStatus(`Finalized. Found ${state.universalQueue.length} update${state.universalQueue.length === 1 ? "" : "s"} to review - starting with ${describeUniversalTask(first)}.${errNote}${integratedIdeaNote}`, !!finalizeJob.error);
+      try {
+        await dispatchUniversalTask(first);
+      } finally {
+        updateUniversalQueueBar();
+      }
+    } else if (finalizeJob && finalizeJob.error) {
+      setStatus(`Finalize hit an error: ${finalizeJob.error}`, true);
+    } else {
+      setStatus(`Finalized.${integratedIdeaNote}`);
+    }
   }
   // Fired last, after every other await in this function has settled, so a
   // resumed bulk-fix iteration (which navigates the pane via selectItem) can't
@@ -1721,8 +1732,8 @@ export async function syncChapterBible(chapterNum) {
   const job = await pollDeterminateJobKeepErrors(
     `/api/projects/${encodeURIComponent(state.slug)}/chapters/${chapterNum}/bible-sync/status/${job_id}`
   );
-  const { bible_proposals, timeline_proposals, thread_proposals, resolve_proposals, error } = job;
-  const queued = queueBibleProposals(bible_proposals, chapterNum, timeline_proposals, thread_proposals, resolve_proposals);
+  const { bible_proposals, timeline_proposals, thread_proposals, resolve_proposals, timeline_retirements, error } = job;
+  const queued = queueBibleProposals(bible_proposals, chapterNum, timeline_proposals, thread_proposals, resolve_proposals, timeline_retirements);
   if (queued) {
     const first = state.universalQueue[0];
     const errNote = error ? ` (hit an error partway through: ${error}, but earlier-step updates are still queued below)` : "";
@@ -1804,6 +1815,76 @@ export async function checkBookConsistency() {
   setStatus(`Whole-book sweep found ${flags.length} issue${flags.length === 1 ? "" : "s"} - fixing...`);
   await fixAllContinuityFlags();
   await fixAllChapterContinuityIssues();
+  // Surface anything queued along the way (see fixAllOutstandingContinuity
+  // for why this can't just be left for the writer to notice on their own).
+  if (state.universalQueue.length > state.universalQueueIndex) {
+    const first = state.universalQueue[state.universalQueueIndex];
+    setStatus(`${state.universalQueue.length - state.universalQueueIndex} bible/timeline proposal${state.universalQueue.length - state.universalQueueIndex === 1 ? "" : "s"} from these fixes need review - starting with ${describeUniversalTask(first)}.`);
+    try {
+      await dispatchUniversalTask(first);
+    } finally {
+      updateUniversalQueueBar();
+    }
+  }
+}
+
+// Whole-book idea sweep: Thread Planner's forward-seeding (propose_from_chapter)
+// and payoff-resolution (propose_resolutions) passes over every drafted
+// chapter in book order, instead of only the single chapter just finalized.
+// Unlike the per-chapter version, this writes proposals straight to the idea
+// backlog server-side (no per-item approval queue - see the backend's
+// _run_book_ideas_job) since a whole-book sweep can surface far too many
+// proposals to click through one at a time; the writer reviews/discards them
+// afterward via the ordinary idea-backlog UI. Uses pollDeterminateJobKeepErrors
+// (not pollDeterminateJob) because the backend accumulates partial results
+// per-chapter even when some chapters error, and we don't want one bad
+// chapter to discard every other chapter's already-applied results.
+export async function ideasBookSweep() {
+  if (!state.slug) return;
+  setStatus("Starting whole-book idea sweep...");
+  const { job_id } = await api(`/api/projects/${encodeURIComponent(state.slug)}/ideas-book-sweep`, { method: "POST" });
+  const job = await pollDeterminateJobKeepErrors(
+    `/api/projects/${encodeURIComponent(state.slug)}/ideas-book-sweep/status/${job_id}`
+  );
+  await refreshBible();
+  renderSidebar();
+  renderEditor();
+  const created = (job.created_ideas || []).length;
+  const resolved = (job.resolved_ideas || []).length;
+  const errNote = job.error ? ` (hit an error partway through: ${job.error})` : "";
+  if (!created && !resolved) {
+    setStatus(job.error ? `Whole-book idea sweep failed: ${job.error}` : "Whole-book idea sweep found no new planted threads or resolutions.", !!job.error);
+  } else {
+    const parts = [];
+    if (created) parts.push(`added ${created} new idea${created === 1 ? "" : "s"}`);
+    if (resolved) parts.push(`resolved ${resolved}`);
+    setStatus(`Whole-book idea sweep ${parts.join(" and ")} - see the Ideas backlog.${errNote}`, !!job.error);
+  }
+}
+
+// Whole-book research sweep: Researcher's auto-detect pass over every
+// drafted chapter in book order (same nonfiction/real-world-setting gate as
+// the per-chapter version - returns nothing for invented-setting fiction).
+// Same auto-apply rationale as ideasBookSweep above - writes notes straight
+// to research_notes server-side, writer reviews/discards afterward via the
+// ordinary research-notes UI.
+export async function researchBookSweep() {
+  if (!state.slug) return;
+  setStatus("Starting whole-book research sweep...");
+  const { job_id } = await api(`/api/projects/${encodeURIComponent(state.slug)}/research-book-sweep`, { method: "POST" });
+  const job = await pollDeterminateJobKeepErrors(
+    `/api/projects/${encodeURIComponent(state.slug)}/research-book-sweep/status/${job_id}`
+  );
+  await refreshBible();
+  renderSidebar();
+  renderEditor();
+  const created = (job.created_notes || []).length;
+  const errNote = job.error ? ` (hit an error partway through: ${job.error})` : "";
+  if (!created) {
+    setStatus(job.error ? `Whole-book research sweep failed: ${job.error}` : "Whole-book research sweep found nothing to add.", !!job.error);
+  } else {
+    setStatus(`Whole-book research sweep added ${created} new research note${created === 1 ? "" : "s"} - see Research notes.${errNote}`, !!job.error);
+  }
 }
 
 // Bulk counterpart to the Continuity dashboard's per-flag "Fix" button -
@@ -1868,20 +1949,16 @@ export async function fixAllContinuityFlags() {
           // finalize the fix immediately so the information isn't lost moving
           // to the next flag, then re-check below via resolveContinuityFlag.
           await autoApprove(approvalTarget.kind, approvalTarget.id);
-          // Approving a chapter revision can itself queue follow-on bible/
-          // timeline proposals (approveSelected -> queueBibleProposals) and
-          // navigate the pane to the first one. Those are a different kind of
-          // approval (new canon facts, not "did the fix work") and stay
-          // review-gated - stop the batch here and let the writer work the
-          // queue rather than auto-accepting them too.
-          if (state.universalQueue.length > state.universalQueueIndex) {
-            const queuedCount = state.universalQueue.length - state.universalQueueIndex;
-            const remainingNow = flags.length - (i + 1);
-            renderOverview("continuity");
-            setStatus(`Fixed and saved - that also produced ${queuedCount} bible/timeline proposal${queuedCount === 1 ? "" : "s"} to review` +
-              (remainingNow ? ` (${remainingNow} more flag${remainingNow === 1 ? "" : "s"} left in this batch - re-run "Fix all" after reviewing).` : "."));
-            return;
-          }
+          // Approving a chapter revision can itself surface follow-on bible/
+          // timeline fact-extraction proposals (approveSelected ->
+          // autoApplyBibleProposals, since bulkAutoSaveMode is set here) -
+          // those are now applied directly rather than queued for review, so
+          // this loop keeps moving through the remaining flags without
+          // stopping. (The writer's own manual, chapter-by-chapter approve
+          // flow still queues these for review - see queueBibleProposals.)
+          // The queuedCount check below is a fallback for anything that still
+          // ends up queued (e.g. a task type autoApplyUniversalTask doesn't
+          // cover).
         }
         await resolveContinuityFlag(flag.id);
       } catch (err) {
@@ -1897,9 +1974,13 @@ export async function fixAllContinuityFlags() {
   }
   renderOverview("continuity");
   const remaining = (state.bible.continuity_flags || []).length;
-  setStatus(remaining
+  const queuedCount = state.universalQueue.length - state.universalQueueIndex;
+  const queuedNote = queuedCount
+    ? ` ${queuedCount} bible/timeline proposal${queuedCount === 1 ? "" : "s"} from these fixes ${queuedCount === 1 ? "is" : "are"} queued for review.`
+    : "";
+  setStatus((remaining
     ? `Fixed what it could - ${remaining} flag${remaining === 1 ? "" : "s"} still remain.`
-    : "All continuity flags fixed.");
+    : "All continuity flags fixed.") + queuedNote);
 }
 
 // Bulk counterpart to each flagged chapter's own "Fix with AI" button (for
@@ -1993,11 +2074,24 @@ export async function fixAllOutstandingContinuity() {
   }
   const remainingFlags = (state.bible.continuity_flags || []).length;
   const remainingChapters = (state.bible.chapters || []).filter(c => (c.continuity_issues || []).length).length;
-  setStatus(
-    remainingFlags || remainingChapters
-      ? `Fixed what it could - ${remainingFlags} flag${remainingFlags === 1 ? "" : "s"} and ${remainingChapters} chapter${remainingChapters === 1 ? "" : "s"} still need attention.`
-      : "All outstanding continuity findings fixed and open chapters finalized."
-  );
+  const summary = remainingFlags || remainingChapters
+    ? `Fixed what it could - ${remainingFlags} flag${remainingFlags === 1 ? "" : "s"} and ${remainingChapters} chapter${remainingChapters === 1 ? "" : "s"} still need attention.`
+    : "All outstanding continuity findings fixed and open chapters finalized.";
+  // Fixes queued along the way (see fixAllContinuityFlags/finalizeOpenChapters)
+  // sit invisibly in state.universalQueue until something dispatches the
+  // first one and shows the queue bar - do that now, once, for the whole
+  // batch, instead of leaving the writer to discover them.
+  if (state.universalQueue.length > state.universalQueueIndex) {
+    const first = state.universalQueue[state.universalQueueIndex];
+    setStatus(`${summary} ${state.universalQueue.length - state.universalQueueIndex} bible/timeline proposal${state.universalQueue.length - state.universalQueueIndex === 1 ? "" : "s"} from these fixes need review - starting with ${describeUniversalTask(first)}.`);
+    try {
+      await dispatchUniversalTask(first);
+    } finally {
+      updateUniversalQueueBar();
+    }
+  } else {
+    setStatus(summary);
+  }
 }
 
 // -- translation (final pass) ----------------------------------------------
@@ -3051,6 +3145,38 @@ function renderOverview(id) {
     return;
   }
 
+  if (id === "ideas") {
+    const openIdeas = (b.ideas || []).filter(i => !i.resolved);
+    section("Summary", para(`${openIdeas.length} open idea${openIdeas.length === 1 ? "" : "s"} in the backlog. Individual ideas live in the Ideas branch of the left sidebar - this view is for the whole-book sweep.`));
+
+    const ideasSweepBody = document.createElement("div");
+    ideasSweepBody.appendChild(para("Forward-seeding and payoff-resolution pass over every drafted chapter in book order: proposes setups the writer hasn't planted yet, and flags already-open planted threads a later chapter seems to pay off. Distinct from the per-chapter version that only runs at finalize time. Proposals are added straight to the idea backlog - review/discard them there afterward."));
+    const ideasSweepBtn = document.createElement("button");
+    ideasSweepBtn.textContent = "Sweep whole book for ideas";
+    ideasSweepBtn.addEventListener("click", () => {
+      withInlineFeedback(ideasSweepBtn, () => ideasBookSweep()).catch(() => {});
+    });
+    ideasSweepBody.appendChild(ideasSweepBtn);
+    section("Idea sweep (whole book)", ideasSweepBody);
+    return;
+  }
+
+  if (id === "research") {
+    const notesCount = (b.research_notes || []).length;
+    section("Summary", para(`${notesCount} research note${notesCount === 1 ? "" : "s"} recorded. Individual notes live in the Research notes branch of the right sidebar - this view is for the whole-book sweep.`));
+
+    const researchSweepBody = document.createElement("div");
+    researchSweepBody.appendChild(para("Auto-detects factual claims worth sourcing across every drafted chapter in book order (nonfiction or real-world-setting projects only - returns nothing for invented settings). Proposals are added straight to research notes - review/discard them there afterward."));
+    const researchSweepBtn = document.createElement("button");
+    researchSweepBtn.textContent = "Sweep whole book for research";
+    researchSweepBtn.addEventListener("click", () => {
+      withInlineFeedback(researchSweepBtn, () => researchBookSweep()).catch(() => {});
+    });
+    researchSweepBody.appendChild(researchSweepBtn);
+    section("Research sweep (whole book)", researchSweepBody);
+    return;
+  }
+
   if (id === "critique") {
     const runBody = document.createElement("div");
     runBody.appendChild(para("Developmental-editing pass: pacing, stakes/tension, and craft (show-vs-tell, POV). Separate from the correctness-focused Continuity view. Run per-chapter from a chapter's overflow menu, or the whole book below."));
@@ -3485,6 +3611,7 @@ function describeUniversalTask(task) {
     case "revise_timeline_event": return `revise timeline event "${task.target_name}"`;
     case "revise_idea": return `revise idea "${task.target_name}"${fromChapter(task)}`;
     case "resolve_idea": return `mark idea "${task.target_name}" resolved${fromChapter(task)}`;
+    case "retire_timeline_event": return `retire stale timeline event "${task.target_name}"${fromChapter(task)}`;
     case "revise_chapter": return `revise chapter ${task.chapter_num}`;
     case "revise_outline_entry": return `update outline chapter ${task.chapter_num}`;
     case "revise_scene": return `revise chapter ${task.chapter_num} scene ${task.scene_num}`;
@@ -3606,6 +3733,17 @@ async function dispatchUniversalTask(task) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: "resolved" }),
     });
+    await refreshBible();
+    renderSidebar();
+    renderEditor();
+    return;
+  }
+  if (task.action === "retire_timeline_event") {
+    // Applied directly (no diff/approve step - it's undoing a stale fact, not
+    // proposing new canon) so this works headlessly inside a bulk loop too -
+    // see autoApplyUniversalTask's identical branch and
+    // project_ghostwriter_timeline_staleness_gap.
+    await api(`/api/projects/${encodeURIComponent(state.slug)}/entities/timeline/${encodeURIComponent(task.target_name)}`, { method: "DELETE" });
     await refreshBible();
     renderSidebar();
     renderEditor();
@@ -3887,6 +4025,24 @@ function timelineProposalTasks(proposals, chapterNum) {
   }));
 }
 
+// Converts the timeline extractor's proposed retirements (a chapter revision
+// that removed/contradicted an event the bible already logged against this
+// same chapter_num - see propose_retirements in timeline_extractor.py and
+// project_ghostwriter_timeline_staleness_gap) into retire_timeline_event
+// tasks. Applied directly on dispatch, same as resolve_idea below - retiring
+// a stale entry isn't new canon needing a diff/approve step, it's undoing a
+// fact the current chapter text no longer supports.
+function timelineRetirementTasks(retirements, chapterNum) {
+  if (!retirements || !retirements.length) return [];
+  return retirements.map((r) => ({
+    action: "retire_timeline_event",
+    instruction: r.reason,
+    target_name: r.name,
+    chapter_num: r.chapter_num || chapterNum,
+    next_chapter_num: null,
+  }));
+}
+
 // Converts the thread planner's proposed forward-seeding notes (from a
 // chapter finalize job) into create_idea tasks carrying the already-drafted
 // {title, notes, linked_kind, linked_id, category} as payload, so
@@ -3928,12 +4084,12 @@ function resolveProposalTasks(proposals, chapterNum) {
 
 // Converts the bible manager's unapplied character/faction/world proposals
 // (from a chapter finalize job), plus any timeline-extractor, thread-
-// planner, and thread-resolution proposals, into the same universal-task-
-// queue shape used elsewhere, so each one goes through a normal revise-and-
-// approve (for an existing entry) or draft-and-create (for a brand-new one)
-// step instead of writing to the bible unreviewed.
-function queueBibleProposals(proposals, chapterNum, timelineProposals, threadProposals, resolveProposals) {
-  if ((!proposals || !proposals.length) && (!timelineProposals || !timelineProposals.length) && (!threadProposals || !threadProposals.length) && (!resolveProposals || !resolveProposals.length)) return false;
+// planner, and thread-resolution proposals, into the same universal-task
+// shape used elsewhere, so each one can either go through a normal
+// revise-and-approve (for an existing entry) or draft-and-create (for a
+// brand-new one) review step, or be applied directly - see queueBibleProposals
+// vs autoApplyBibleProposals below.
+function buildBibleProposalTasks(proposals, chapterNum, timelineProposals, threadProposals, resolveProposals, timelineRetirements) {
   const tasks = (proposals || []).flatMap((p) => {
     const instruction = p.exists
       ? `Add this newly established fact from Chapter ${chapterNum}: ${p.new_facts}`
@@ -3970,12 +4126,126 @@ function queueBibleProposals(proposals, chapterNum, timelineProposals, threadPro
     }
     return [task];
   });
-  return enqueueUniversalTasks([
+  return [
     ...tasks,
     ...timelineProposalTasks(timelineProposals, chapterNum),
+    ...timelineRetirementTasks(timelineRetirements, chapterNum),
     ...plantedThreadProposalTasks(threadProposals, chapterNum),
     ...resolveProposalTasks(resolveProposals, chapterNum),
-  ]);
+  ];
+}
+
+// The writer's own manual, one-chapter-at-a-time approve flow: these
+// fact-extraction proposals stay review-gated (queued, modal-driven) since
+// they're speculative new canon pulled from prose, not a targeted fix - see
+// project_ghostwriter_finalize_approval_boundaries.
+function queueBibleProposals(proposals, chapterNum, timelineProposals, threadProposals, resolveProposals, timelineRetirements) {
+  const tasks = buildBibleProposalTasks(proposals, chapterNum, timelineProposals, threadProposals, resolveProposals, timelineRetirements);
+  if (!tasks.length) return false;
+  return enqueueUniversalTasks(tasks);
+}
+
+// Bulk/whole-book counterpart to queueBibleProposals: applies each
+// fact-extraction proposal directly (no modal, no click) instead of queuing
+// it for review. Only called when bulkAutoSaveMode is set - the writer was
+// clear that chapter-by-chapter approval should keep its review gate, but a
+// whole-book "Fix all" pass shouldn't keep stopping on every proposal it
+// turns up along the way (see project_ghostwriter_finalize_approval_boundaries).
+// Applies best-effort: one bad proposal is reported and skipped rather than
+// aborting the rest of the batch. Returns the number of proposals applied.
+async function autoApplyBibleProposals(proposals, chapterNum, timelineProposals, threadProposals, resolveProposals, timelineRetirements) {
+  const tasks = buildBibleProposalTasks(proposals, chapterNum, timelineProposals, threadProposals, resolveProposals, timelineRetirements);
+  let applied = 0;
+  for (const task of tasks) {
+    try {
+      await autoApplyUniversalTask(task);
+      applied++;
+    } catch (err) {
+      setStatus(`Couldn't auto-apply a bible update (${describeUniversalTask(task)}): ${err.message || err}`, true);
+    }
+  }
+  return applied;
+}
+
+// Headless equivalent of dispatchUniversalTask for the task types
+// buildBibleProposalTasks can produce - performs the same end effect as
+// "fill the modal/instruction box, then click Create/Approve" but via direct
+// API calls, with no UI involved, so it works when nothing is on screen to
+// fill in (a bulk loop can be mid-way through a different chapter/entity).
+async function autoApplyUniversalTask(task) {
+  if (task.action === "create_character" || task.action === "create_world") {
+    const kind = task.action === "create_character" ? "characters" : "world";
+    const draft = await api(`/api/projects/${encodeURIComponent(state.slug)}/entities/${kind}/suggest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: task.instruction }),
+    });
+    const name = draft.name || task.target_name || "Untitled";
+    const body = kind === "characters"
+      ? { name, role: draft.role || "supporting", description: draft.description || "", is_real: false }
+      : { name, category: draft.category || "general", content: draft.content || "", is_real: false };
+    await api(`/api/projects/${encodeURIComponent(state.slug)}/entities/${kind}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    await refreshBible();
+    renderSidebar();
+    markTouched(kind, name, `${kindLabel(kind)}: ${name} (new)`);
+    return;
+  }
+  if (task.action === "create_timeline_event") {
+    await api(`/api/projects/${encodeURIComponent(state.slug)}/entities/timeline`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(task.payload),
+    });
+    await refreshBible();
+    renderSidebar();
+    markTouched("timeline", task.payload.name, `Timeline: ${task.payload.name} (new)`);
+    return;
+  }
+  if (task.action === "create_idea") {
+    await api(`/api/projects/${encodeURIComponent(state.slug)}/ideas`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(task.payload),
+    });
+    await refreshBible();
+    renderSidebar();
+    return;
+  }
+  if (task.action === "resolve_idea" || task.action === "retire_timeline_event") {
+    await dispatchUniversalTask(task);
+    return;
+  }
+  if (task.action === "revise_character" || task.action === "revise_world") {
+    const kind = task.action === "revise_character" ? "characters" : "world";
+    await api(`/api/projects/${encodeURIComponent(state.slug)}/entities/${kind}/${encodeURIComponent(task.target_name)}/revise`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction: task.instruction }),
+    });
+    await autoApprove(kind, task.target_name);
+    return;
+  }
+  if (task.action === "resync_character_sections") {
+    const result = await api(`/api/projects/${encodeURIComponent(state.slug)}/characters/${encodeURIComponent(task.target_name)}/sections/resync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_facts: task.instruction, chapter_num: task.chapter_num ?? null }),
+    });
+    const sections = result.sections || {};
+    if (!Object.keys(sections).length) return;
+    await api(`/api/projects/${encodeURIComponent(state.slug)}/characters/${encodeURIComponent(task.target_name)}/sections`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sections }),
+    });
+    await refreshBible();
+    markTouched("characters", task.target_name, `Character: ${task.target_name}`);
+    return;
+  }
 }
 
 // Converts auto-detected research proposals (from a non-fiction chapter

@@ -385,41 +385,27 @@ function buildActGroup(act, leaves) {
 export function renderSidebar() {
   renderOneSidebar("tree-sidebar", LEFT_BRANCHES);
   renderOneSidebar("entity-sidebar", RIGHT_BRANCHES);
+  renderIdeaSweepLink();
+  renderRailContinuityDot();
+  renderResearchSweepLink();
   renderBibliographyLink();
-  renderContinuityLink();
   renderCritiqueLink();
 }
 
-// Master Bible / Continuity dashboard - a standalone link like Bibliography
-// and Critique below, so it's reachable from anywhere instead of only via
-// the button buried in a chapter's own utility rail (which requires opening
-// some chapter first). Count mirrors that button's: flagged chapters
+// Master Bible / Continuity is reached via the icon-rail button (index.html,
+// data-tab="continuity"), not a sidebar link - this just keeps its open-issue
+// badge current. Count mirrors the old sidebar link's: flagged chapters
 // (continuity_issues or needs_recheck) plus open continuity_flags entries.
-function renderContinuityLink() {
-  const root = $("tree-sidebar");
-  if (!root || !state.slug) return;
-  const section = document.createElement("div");
-  section.className = "sb-branch";
-  const head = document.createElement("div");
-  head.className = "sb-branch-head";
-  const title = document.createElement("span");
-  title.className = "sb-branch-title";
+function renderRailContinuityDot() {
+  const railDot = $("rail-continuity-dot");
+  if (!railDot || !state.slug) return;
   const flaggedChapters = (state.bible.chapters || []).filter(
     ch => (ch.continuity_issues || []).length || ch.needs_recheck
   ).length;
   const openFlags = (state.bible.continuity_flags || []).length;
   const openCount = flaggedChapters + openFlags;
-  title.textContent = openCount ? `Continuity (${openCount})` : "Continuity";
-  head.appendChild(title);
-  head.addEventListener("click", () => selectItem("overview", "continuity"));
-  section.appendChild(head);
-  root.appendChild(section);
-
-  const railDot = $("rail-continuity-dot");
-  if (railDot) {
-    railDot.classList.toggle("hidden", !openCount);
-    railDot.textContent = openCount || "";
-  }
+  railDot.classList.toggle("hidden", !openCount);
+  railDot.textContent = openCount || "";
 }
 
 // Non-fiction-only book-level view of every cited research note, alongside
@@ -458,6 +444,53 @@ function renderCritiqueLink() {
   title.textContent = openCount ? `Critique (${openCount})` : "Critique";
   head.appendChild(title);
   head.addEventListener("click", () => selectItem("overview", "critique"));
+  section.appendChild(head);
+  root.appendChild(section);
+}
+
+// Whole-book idea sweep (forward-seeding/payoff pass over every drafted
+// chapter) used to be a section buried inside the Continuity dashboard,
+// which made it easy to miss since it isn't a continuity/consistency check -
+// it's its own pass over a different bucket (the idea backlog). Standalone
+// link like Continuity/Bibliography/Critique above. Distinct from the
+// left-sidebar "Ideas" branch, which lists individual idea leaves - this is
+// just the entry point for the whole-book sweep action.
+function renderIdeaSweepLink() {
+  const root = $("tree-sidebar");
+  if (!root || !state.slug) return;
+  const section = document.createElement("div");
+  section.className = "sb-branch";
+  const head = document.createElement("div");
+  head.className = "sb-branch-head";
+  const title = document.createElement("span");
+  title.className = "sb-branch-title";
+  title.textContent = "Idea sweep";
+  head.appendChild(title);
+  head.addEventListener("click", () => selectItem("overview", "ideas"));
+  section.appendChild(head);
+  root.appendChild(section);
+}
+
+// Whole-book research sweep - same rationale as renderIdeaSweepLink above,
+// moved out of the Continuity dashboard. Left ungated (unlike Bibliography,
+// which only makes sense for nonfiction): a fiction book can still reference
+// real places/facts - a spy novel, a romance set in Paris - without the
+// writer having ticked "Set in the real world" in Overview, so hiding the
+// link behind that flag would bury it exactly for the books that need it.
+// The sweep itself is a no-op (finds nothing) for a fully invented setting;
+// the pane's own copy says so.
+function renderResearchSweepLink() {
+  const root = $("entity-sidebar");
+  if (!root || !state.slug) return;
+  const section = document.createElement("div");
+  section.className = "sb-branch";
+  const head = document.createElement("div");
+  head.className = "sb-branch-head";
+  const title = document.createElement("span");
+  title.className = "sb-branch-title";
+  title.textContent = "Research sweep";
+  head.appendChild(title);
+  head.addEventListener("click", () => selectItem("overview", "research"));
   section.appendChild(head);
   root.appendChild(section);
 }

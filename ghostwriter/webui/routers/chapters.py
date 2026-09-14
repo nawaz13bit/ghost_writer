@@ -45,6 +45,8 @@ _revise_jobs = JobStore()
 _critique_book_jobs = JobStore()
 _book_consistency_jobs = JobStore()
 _translate_book_jobs = JobStore()
+_ideas_book_jobs = JobStore()
+_research_book_jobs = JobStore()
 
 CRITIQUE_CHECKERS = [pacing_checker, stakes_checker, craft_checker]
 
@@ -328,6 +330,10 @@ def _run_finalize_job(job_id: str, slug: str, chapter_num: int, history_id: int)
         except Exception as exc:
             sync_errors.append(f"Timeline sync: {exc}")
         try:
+            job["timeline_retirements"] = timeline_extractor.propose_retirements(bible, chapter_num, polished)
+        except Exception as exc:
+            sync_errors.append(f"Timeline staleness check: {exc}")
+        try:
             paradox_flags = continuity_checker.check_timeline_paradoxes(bible)
             if paradox_flags:
                 bible.add_continuity_flags(paradox_flags)
@@ -384,6 +390,7 @@ def start_approve_chapter(slug: str, chapter_num: int, req: ApproveRequest) -> d
     job_id = _finalize_jobs.create({
         "bible_proposals": [],
         "timeline_proposals": [],
+        "timeline_retirements": [],
         "thread_proposals": [],
         "resolve_proposals": [],
         "step_index": 0,
@@ -451,6 +458,11 @@ def _run_bible_sync_job(job_id: str, slug: str, chapter_num: int) -> None:
             logger.exception("Timeline sync failed for project %r chapter %r", slug, chapter_num)
             errors.append(f"Timeline sync: {exc}")
         try:
+            job["timeline_retirements"] = timeline_extractor.propose_retirements(bible, chapter_num, text)
+        except Exception as exc:
+            logger.exception("Timeline staleness check failed for project %r chapter %r", slug, chapter_num)
+            errors.append(f"Timeline staleness check: {exc}")
+        try:
             paradox_flags = continuity_checker.check_timeline_paradoxes(bible)
             if paradox_flags:
                 bible.add_continuity_flags(paradox_flags)
@@ -496,6 +508,7 @@ def sync_chapter_bible(slug: str, chapter_num: int) -> dict[str, Any]:
     job_id = _bible_sync_jobs.create({
         "bible_proposals": [],
         "timeline_proposals": [],
+        "timeline_retirements": [],
         "thread_proposals": [],
         "resolve_proposals": [],
         "step_index": 0,
@@ -762,6 +775,157 @@ def book_consistency_check(slug: str) -> dict[str, Any]:
 @router.get("/api/projects/{slug}/book-consistency-check/status/{job_id}")
 def book_consistency_check_status(slug: str, job_id: str) -> dict[str, Any]:
     job = _book_consistency_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "No such job")
+    return job
+
+
+@with_bible_lock
+def _run_book_ideas_job(job_id: str, slug: str) -> None:
+    """Unlike the per-chapter version (which queues proposals for the writer
+    to approve via the universal queue), a whole-book sweep can surface
+    dozens of proposals at once - forcing a click-through-each modal for all
+    of them isn't "review", it's a chore. So this writes every proposal
+    straight into the idea backlog / marks resolutions directly, the same
+    way "resolve_idea" already applies on dispatch with no modal - and the
+    writer reviews/discards afterward through the ordinary idea-backlog UI
+    (edit/delete/promote), not a one-at-a-time queue."""
+    job = _ideas_book_jobs.get(job_id)
+    try:
+        bible = load_bible(slug)
+        chapters = [
+            ch for ch in bible.data.get("chapters", [])
+            if (ch.get("final") or current_chapter_text(ch))
+        ]
+        chapters.sort(key=lambda ch: ch["chapter_num"])
+        job["total_steps"] = len(chapters) or 1
+
+        created_ideas: list[dict[str, Any]] = []
+        resolved_ideas: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for i, ch in enumerate(chapters):
+            chapter_num = ch["chapter_num"]
+            job["step_index"] = i
+            job["label"] = f"Chapter {chapter_num}"
+            text = ch.get("final") or current_chapter_text(ch)
+            try:
+                for p in thread_planner.propose_from_chapter(bible, chapter_num, text):
+                    idea = bible.add_idea(
+                        f"Plant for Chapter {p['linked_id']}", p["note"],
+                        p.get("linked_kind", "outline"), p.get("linked_id"), "planted_thread",
+                    )
+                    created_ideas.append(idea)
+            except Exception as exc:
+                errors.append(f"Chapter {chapter_num} planted-thread ideas: {exc}")
+            try:
+                for p in thread_planner.propose_resolutions(bible, chapter_num, text):
+                    idea = bible.update_idea(p["idea_id"], status="resolved")
+                    resolved_ideas.append(idea)
+            except Exception as exc:
+                errors.append(f"Chapter {chapter_num} thread resolutions: {exc}")
+
+        job["step_index"] = job["total_steps"]
+        job["created_ideas"] = created_ideas
+        job["resolved_ideas"] = resolved_ideas
+        if errors:
+            job["error"] = "; ".join(errors)
+    except Exception as exc:
+        job["error"] = str(exc)
+    finally:
+        job["done"] = True
+
+
+@router.post("/api/projects/{slug}/ideas-book-sweep")
+def ideas_book_sweep(slug: str) -> dict[str, Any]:
+    """Whole-book idea sweep: runs the Thread Planner's forward-seeding and
+    payoff-resolution passes over every drafted/finalized chapter in book
+    order, instead of only at finalize time for whichever single chapter was
+    just approved. Proposals are written straight to the idea backlog (see
+    _run_book_ideas_job) - the writer reviews/discards them afterward via the
+    ordinary idea-backlog UI, not a one-at-a-time approval queue. Distinct
+    from Continuity's book sweep (fact correctness) and Critique's
+    (craft/pacing) - this one is about setups and payoffs the writer hasn't
+    placed yet."""
+    bible = load_bible(slug)
+    if not any(ch.get("final") or current_chapter_text(ch) for ch in bible.data.get("chapters", [])):
+        raise HTTPException(400, "No drafted chapters yet")
+
+    job_id = _ideas_book_jobs.create({
+        "created_ideas": [], "resolved_ideas": [],
+        "step_index": 0, "total_steps": 1, "label": "Starting...",
+    })
+    threading.Thread(target=_run_book_ideas_job, args=(job_id, slug), daemon=True).start()
+    return {"job_id": job_id}
+
+
+@router.get("/api/projects/{slug}/ideas-book-sweep/status/{job_id}")
+def ideas_book_sweep_status(slug: str, job_id: str) -> dict[str, Any]:
+    job = _ideas_book_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "No such job")
+    return job
+
+
+@with_bible_lock
+def _run_book_research_job(job_id: str, slug: str) -> None:
+    """Writes every proposed note straight into research_notes (see
+    _run_book_ideas_job for why) - the writer reviews/discards them
+    afterward via the ordinary research-notes UI, not a one-at-a-time
+    approval queue."""
+    job = _research_book_jobs.get(job_id)
+    try:
+        bible = load_bible(slug)
+        entries = [
+            e for e in sorted(bible.data["outline"], key=lambda o: o["chapter_num"])
+            if (lambda ch: ch and (ch.get("final") or current_chapter_text(ch)))(bible.get_chapter(e["chapter_num"]))
+        ]
+        job["total_steps"] = len(entries) or 1
+
+        created_notes: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for i, entry in enumerate(entries):
+            chapter_num = entry["chapter_num"]
+            job["step_index"] = i
+            job["label"] = f"Chapter {chapter_num}"
+            try:
+                for p in researcher.suggest_for_chapter(bible, chapter_num, entry):
+                    note = bible.add_research_note(p["topic"], p["content"], p.get("sources"))
+                    created_notes.append(note)
+            except Exception as exc:
+                errors.append(f"Chapter {chapter_num}: {exc}")
+
+        job["step_index"] = job["total_steps"]
+        job["created_notes"] = created_notes
+        if errors:
+            job["error"] = "; ".join(errors)
+    except Exception as exc:
+        job["error"] = str(exc)
+    finally:
+        job["done"] = True
+
+
+@router.post("/api/projects/{slug}/research-book-sweep")
+def research_book_sweep(slug: str) -> dict[str, Any]:
+    """Whole-book research sweep: runs the Researcher's auto-detect pass
+    (finds factual claims worth sourcing, gated on nonfiction/real-world-
+    setting projects same as the per-chapter version) over every drafted/
+    finalized chapter in book order. Proposals are written straight to
+    research_notes (see _run_book_research_job) - the writer reviews/
+    discards them afterward via the ordinary research-notes UI."""
+    bible = load_bible(slug)
+    if not any(ch.get("final") or current_chapter_text(ch) for ch in bible.data.get("chapters", [])):
+        raise HTTPException(400, "No drafted chapters yet")
+
+    job_id = _research_book_jobs.create({
+        "created_notes": [], "step_index": 0, "total_steps": 1, "label": "Starting...",
+    })
+    threading.Thread(target=_run_book_research_job, args=(job_id, slug), daemon=True).start()
+    return {"job_id": job_id}
+
+
+@router.get("/api/projects/{slug}/research-book-sweep/status/{job_id}")
+def research_book_sweep_status(slug: str, job_id: str) -> dict[str, Any]:
+    job = _research_book_jobs.get(job_id)
     if job is None:
         raise HTTPException(404, "No such job")
     return job

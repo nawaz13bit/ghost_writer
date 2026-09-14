@@ -8,10 +8,10 @@ import { refreshBible } from "./projects.js";
 import { selectItem } from "./editor.js";
 
 const CROSSPOINT_STYLE = {
-  cause_effect: { stroke: "#4a90d9", dash: "" },
-  shared_location: { stroke: "#7cb342", dash: "4,3" },
-  shared_object: { stroke: "#c48a2e", dash: "2,2" },
-  paradox_loop: { stroke: "#c0392b", dash: "6,3" },
+  cause_effect: { stroke: "#4a90d9", dash: "", label: "Cause / effect" },
+  shared_location: { stroke: "#7cb342", dash: "4,3", label: "Shared location" },
+  shared_object: { stroke: "#c48a2e", dash: "2,2", label: "Shared object" },
+  paradox_loop: { stroke: "#c0392b", dash: "6,3", label: "Paradox / loop" },
 };
 
 let wired = false;
@@ -144,13 +144,19 @@ async function renderSwimlane() {
 
   lanes.forEach((lane, laneIdx) => {
     const y = laneIdx * laneHeight + laneHeight / 2;
+
+    const stripe = document.createElement("div");
+    stripe.className = "tl-lane-stripe" + (laneIdx % 2 ? " alt" : "");
+    stripe.style.top = `${laneIdx * laneHeight}px`;
+    stripe.style.height = `${laneHeight}px`;
+    stripe.style.width = `${svgWidth}px`;
+    inner.appendChild(stripe);
+
     const label = document.createElement("div");
+    label.className = "tl-lane-label";
     label.textContent = lane.track ? lane.track.name : "(main)";
-    label.style.position = "absolute";
-    label.style.left = "0";
     label.style.top = `${y - 10}px`;
     label.style.width = `${leftMargin - 16}px`;
-    label.style.fontWeight = "600";
     label.style.color = lane.track?.color || "#888";
     inner.appendChild(label);
 
@@ -160,26 +166,18 @@ async function renderSwimlane() {
 
       const dot = document.createElement("button");
       dot.className = "tl-swimlane-dot";
-      dot.style.position = "absolute";
-      dot.style.left = `${x - 6}px`;
-      dot.style.top = `${y - 6}px`;
-      dot.style.width = "12px";
-      dot.style.height = "12px";
-      dot.style.borderRadius = "50%";
-      dot.style.border = "none";
-      dot.style.cursor = "pointer";
+      dot.style.left = `${x - 7}px`;
+      dot.style.top = `${y - 7}px`;
       dot.style.background = lane.track?.color || "#4a90d9";
-      dot.title = ev.name;
+      dot.title = `${ev.name}${ev.story_date ? ` — ${ev.story_date}` : ""}${ev.chapter_num ? ` (ch.${ev.chapter_num})` : ""}`;
       dot.addEventListener("click", () => selectItem("timeline", ev.name));
       inner.appendChild(dot);
 
       const label2 = document.createElement("div");
-      label2.style.position = "absolute";
+      label2.className = "tl-event-label";
       label2.style.left = `${x - dotSpacing / 2}px`;
       label2.style.top = `${y + 10}px`;
       label2.style.width = `${dotSpacing}px`;
-      label2.style.textAlign = "center";
-      label2.style.fontSize = "0.8em";
       label2.innerHTML = `${escapeHtml(ev.name)}${ev.chapter_num ? `<br><span class="modal-hint">ch.${ev.chapter_num}</span>` : ""}`;
       inner.appendChild(label2);
     });
@@ -191,13 +189,16 @@ async function renderSwimlane() {
   svg.style.position = "absolute";
   svg.style.left = "0";
   svg.style.top = "0";
+  svg.style.zIndex = "1";
   svg.style.pointerEvents = "none";
 
+  const usedTypes = new Set();
   for (const cp of view.crosspoints || []) {
     const a = dotPositions[cp.from_event];
     const b = dotPositions[cp.to_event];
     if (!a || !b) continue;
     const style = CROSSPOINT_STYLE[cp.type] || CROSSPOINT_STYLE.cause_effect;
+    usedTypes.add(CROSSPOINT_STYLE[cp.type] ? cp.type : "cause_effect");
     const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
     line.setAttribute("x1", String(a.x));
     line.setAttribute("y1", String(a.y));
@@ -206,12 +207,33 @@ async function renderSwimlane() {
     line.setAttribute("stroke", style.stroke);
     if (style.dash) line.setAttribute("stroke-dasharray", style.dash);
     line.setAttribute("stroke-width", "2");
+    const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    title.textContent = `${style.label}: ${cp.from_event} → ${cp.to_event}`;
+    line.appendChild(title);
     svg.appendChild(line);
   }
 
   inner.prepend(svg);
   wrap.appendChild(inner);
   container.appendChild(wrap);
+
+  if (usedTypes.size) {
+    const legend = document.createElement("div");
+    legend.className = "tl-legend";
+    for (const type of usedTypes) {
+      const style = CROSSPOINT_STYLE[type];
+      const item = document.createElement("span");
+      item.className = "tl-legend-item";
+      const swatch = document.createElement("span");
+      swatch.className = "tl-legend-swatch";
+      swatch.style.borderTopColor = style.stroke;
+      swatch.style.borderTopStyle = style.dash ? "dashed" : "solid";
+      item.appendChild(swatch);
+      item.appendChild(document.createTextNode(style.label));
+      legend.appendChild(item);
+    }
+    container.appendChild(legend);
+  }
 }
 
 function escapeHtml(s) {

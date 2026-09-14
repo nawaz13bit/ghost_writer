@@ -7,7 +7,8 @@
 // since it reaches across every section rather than rendering one tree.
 import { $, state } from "./api.js";
 import {
-  checkBookConsistency, checkConsistency, critiqueBook, openEntityModal, openIdeaModal, openOutlineModal, selectItem,
+  checkBookConsistency, checkConsistency, critiqueBook, ideasBookSweep, openEntityModal, openIdeaModal, openOutlineModal,
+  researchBookSweep, selectItem,
 } from "./editor.js";
 import { selectChapter } from "./manuscript.js";
 import { exportEpub, exportManuscript, exportPdf } from "./projects.js";
@@ -58,6 +59,8 @@ function actionItems() {
     { group: "Do", label: "Check consistency", run: () => checkConsistency() },
     { group: "Do", label: "Check Whole Book Consistency", run: () => checkBookConsistency() },
     { group: "Do", label: "Critique Whole Book", run: () => critiqueBook() },
+    { group: "Do", label: "Sweep Whole Book for Ideas", run: () => ideasBookSweep() },
+    { group: "Do", label: "Sweep Whole Book for Research", run: () => researchBookSweep() },
     { group: "Do", label: "Export Manuscript (Markdown)", run: () => exportManuscript() },
     { group: "Do", label: "Export EPUB", run: () => exportEpub() },
     { group: "Do", label: "Export PDF", run: () => exportPdf() },

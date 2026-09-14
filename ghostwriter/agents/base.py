@@ -5,7 +5,7 @@ import json
 import re
 from typing import Callable
 
-from ghostwriter.llm_client import LLMClient
+from ghostwriter.llm_client import LLMClient, LLMTruncated
 
 
 class AIOutputError(ValueError):
@@ -94,7 +94,14 @@ class Agent:
         batch behaves exactly as before (one call, same as ask_json)."""
         merged: list[dict] = []
         for batch in chunk_by_chars(entries, max_chars):
-            result = self.ask_json(build_prompt("\n".join(batch)), **kwargs)
+            try:
+                result = self.ask_json(build_prompt("\n".join(batch)), **kwargs)
+            except (ValueError, LLMTruncated):
+                # A single batch running out of max_tokens or failing to
+                # parse (a long book can push a batch's prompt close to the
+                # context window) shouldn't discard every other batch's
+                # already-successful results - skip it and keep going.
+                continue
             if isinstance(result, dict):
                 result = [result]
             if isinstance(result, list):
@@ -162,7 +169,13 @@ class Agent:
         exactly like one plain ask() call seeded with initial_summary."""
         summary = initial_summary
         for batch in chunk_by_chars(items, max_chars):
-            summary = self.ask(build_prompt("\n".join(batch), summary), **kwargs)
+            try:
+                summary = self.ask(build_prompt("\n".join(batch), summary), **kwargs)
+            except LLMTruncated:
+                # Keep the last good summary and fold in the next batch
+                # instead of losing everything refined so far - a truncated
+                # fold is worse than a slightly-stale one.
+                continue
         return summary
 
 

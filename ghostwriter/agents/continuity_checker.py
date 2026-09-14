@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from ghostwriter.agents.base import AIOutputError, Agent, chunk_by_chars
+from ghostwriter.llm_client import LLMTruncated
 from ghostwriter.memory.retriever import build_index, named_entity_hits
 from ghostwriter.memory.story_bible import StoryBible
 
@@ -460,7 +461,12 @@ Each flag object has:
 - "instruction": a concrete instruction for revising this item to fix it"""
             try:
                 result = self.ask_json_object(prompt)
-            except (ValueError, AIOutputError):
+            except (ValueError, AIOutputError, LLMTruncated):
+                # One batch running out of max_tokens (a long running "story
+                # so far" summary plus the full bible sections can fill the
+                # budget on a long book) shouldn't abort the whole sweep -
+                # skip it and keep going with the last good summary, same as
+                # a malformed-JSON batch above.
                 continue
             new_summary = result.get("summary")
             if isinstance(new_summary, str) and new_summary.strip():
