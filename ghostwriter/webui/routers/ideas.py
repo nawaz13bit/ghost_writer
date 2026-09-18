@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ghostwriter.webui.deps import load_bible, with_bible_lock
+from ghostwriter.webui.deps import get_author, load_bible, with_bible_lock
 from ghostwriter.webui.state import reviser
 
 router = APIRouter(tags=["ideas"])
@@ -22,6 +22,7 @@ class NewIdeaRequest(BaseModel):
     linked_kind: str | None = None
     linked_id: str | int | None = None
     category: str | None = None
+    origin_chapter: int | None = None
 
 
 class IdeaEditRequest(BaseModel):
@@ -31,6 +32,7 @@ class IdeaEditRequest(BaseModel):
     linked_id: str | int | None = None
     category: str | None = None
     status: str | None = None
+    origin_chapter: int | None = None
 
 
 class PromoteIdeaRequest(BaseModel):
@@ -50,7 +52,7 @@ def create_idea(slug: str, req: NewIdeaRequest) -> dict[str, Any]:
     if not req.title.strip():
         raise HTTPException(400, "A title is required")
     bible = load_bible(slug)
-    return bible.add_idea(req.title.strip(), req.notes, req.linked_kind, req.linked_id, req.category)
+    return bible.add_idea(req.title.strip(), req.notes, req.linked_kind, req.linked_id, req.category, req.origin_chapter)
 
 
 @router.post("/api/projects/{slug}/ideas/{idea_id}/edit")
@@ -81,8 +83,10 @@ def revise_idea(slug: str, idea_id: int, req: InstructionRequest) -> dict[str, A
     if idea is None:
         raise HTTPException(404, f"No idea {idea_id}")
     old_notes = idea.get("notes") or ""
+    author = get_author(bible)
     new_notes = reviser.revise(
-        f"an idea-backlog entry titled {idea['title']!r}", old_notes or idea["title"], req.instruction
+        f"an idea-backlog entry titled {idea['title']!r}", old_notes or idea["title"], req.instruction,
+        voice_prompt=author.system_prompt,
     )
     return bible.update_idea(idea_id, notes=new_notes)
 

@@ -25,7 +25,7 @@ from ghostwriter.memory.story_bible import StoryBible, slugify
 from ghostwriter.export.pdf_export import build_pdf
 from ghostwriter.tools.epub_export import build_epub
 from ghostwriter.tools.manuscript_import import CHAPTER_EXTENSIONS, import_manuscript
-from ghostwriter.webui.deps import current_chapter_text, load_bible, resolve_length, with_bible_lock
+from ghostwriter.webui.deps import current_chapter_text, get_author, load_bible, resolve_length, with_bible_lock
 from ghostwriter.webui.state import blurb_agent, cfg, discuss_agent, outliner, project_analyzer, researcher, router_agent, translators, world_builder, character_builder
 
 logger = logging.getLogger(__name__)
@@ -382,7 +382,8 @@ def generate_blurb(slug: str) -> dict[str, str]:
     Book details fields, doesn't save it until they hit Save themselves."""
     bible = load_bible(slug)
     try:
-        return blurb_agent.generate(bible)
+        author = get_author(bible)
+        return blurb_agent.generate(bible, voice_prompt=author.system_prompt)
     except AIOutputError as exc:
         raise HTTPException(502, f"The AI returned an unexpected response ({exc}) - try again.")
     except LLMCancelled:
@@ -487,15 +488,18 @@ def create_project(req: NewProjectRequest) -> dict[str, Any]:
         bible.data["research_done"] = True
         bible.save()
     if not bible.data.get("world_built"):
-        world_builder.build(bible)
+        author = get_author(bible)
+        world_builder.build(bible, voice_prompt=author.system_prompt)
         bible.data["world_built"] = True
         bible.save()
     if not bible.data.get("characters_built"):
-        character_builder.build(bible)
+        author = get_author(bible)
+        character_builder.build(bible, voice_prompt=author.system_prompt)
         bible.data["characters_built"] = True
         bible.save()
     if not bible.data["outline"]:
-        outliner.build(bible, chapters, category.get("acts", 3), words_per_chapter=words_per_chapter)
+        author = get_author(bible)
+        outliner.build(bible, chapters, category.get("acts", 3), words_per_chapter=words_per_chapter, voice_prompt=author.system_prompt)
         bible.save()
 
     return {"slug": slug}
@@ -577,7 +581,8 @@ def finalize_project(req: FinalizeProjectRequest) -> dict[str, Any]:
             bible.add_world_entry(w.name, w.category, w.content, w.is_real)
 
     if not bible.data["outline"]:
-        outliner.build(bible, chapters, category.get("acts", 3), words_per_chapter=words_per_chapter)
+        author = get_author(bible)
+        outliner.build(bible, chapters, category.get("acts", 3), words_per_chapter=words_per_chapter, voice_prompt=author.system_prompt)
         bible.save()
 
     return {"slug": slug}

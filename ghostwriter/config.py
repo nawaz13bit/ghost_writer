@@ -21,6 +21,23 @@ def _is_draft_name(name: str) -> bool:
     return "draft" in lower or "mtp" in lower
 
 
+_KNOWN_MODEL_FAMILIES = ["gemma", "qwen", "phi", "llama", "mistral", "deepseek", "yi", "minicpm", "granite"]
+
+
+def _model_family(name: str) -> str | None:
+    """Best-effort family guess from a .gguf filename (e.g. "gemma" from
+    gemma-3-12b-it-Q4.gguf) - used to sanity-check that a draft/MTP model and
+    the main model it's paired with are actually compatible, since a
+    mismatched pairing crashes or silently misbehaves llama.cpp's
+    speculative decoding. None if no known family name appears, meaning
+    "can't tell" rather than "no family"."""
+    lower = name.lower()
+    for family in _KNOWN_MODEL_FAMILIES:
+        if family in lower:
+            return family
+    return None
+
+
 def _find_in_models_dir() -> tuple[str | None, str | None, str | None]:
     """Looks in MODELS_DIR (recursively, so an unzipped llama.cpp release
     subfolder is fine) for a server exe and .gguf model file(s), so the

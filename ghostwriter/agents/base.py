@@ -23,11 +23,13 @@ class Agent:
     def __init__(self, llm: LLMClient):
         self.llm = llm
 
-    def ask(self, user_prompt: str, **gen_kwargs) -> str:
-        return self.llm.chat(self.system_prompt, user_prompt, **gen_kwargs)
+    def ask(self, user_prompt: str, system_prompt: str | None = None, **gen_kwargs) -> str:
+        return self.llm.chat(system_prompt or self.system_prompt, user_prompt, **gen_kwargs)
 
-    def ask_stream(self, user_prompt: str, on_delta: Callable[[str], None], **gen_kwargs) -> str:
-        return self.llm.chat_stream(self.system_prompt, user_prompt, on_delta, **gen_kwargs)
+    def ask_stream(
+        self, user_prompt: str, on_delta: Callable[[str], None], system_prompt: str | None = None, **gen_kwargs
+    ) -> str:
+        return self.llm.chat_stream(system_prompt or self.system_prompt, user_prompt, on_delta, **gen_kwargs)
 
     def ask_json(self, user_prompt: str, retries: int = 2, **gen_kwargs) -> dict | list:
         """Calls the model expecting a JSON payload and parses it, retrying on failure."""

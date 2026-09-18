@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from ghostwriter.agents.base import AIOutputError
 from ghostwriter.llm_client import LLMCancelled
 from ghostwriter.memory.story_bible import StoryBible
-from ghostwriter.webui.deps import load_bible, maybe_compact_history, with_bible_lock
+from ghostwriter.webui.deps import get_author, load_bible, maybe_compact_history, with_bible_lock
 from ghostwriter.webui.diffing import word_diff
 from ghostwriter.webui.state import character_builder, researcher, reviser, world_builder
 
@@ -160,7 +160,8 @@ def suggest_entity(slug: str, kind: str, req: SuggestEntityRequest) -> dict[str,
     if not req.prompt.strip():
         raise HTTPException(400, SUGGEST_KIND_ERROR[kind])
     bible = load_bible(slug)
-    return SUGGEST_KIND_AGENT[kind].suggest_one(bible, req.prompt)
+    author = get_author(bible)
+    return SUGGEST_KIND_AGENT[kind].suggest_one(bible, req.prompt, voice_prompt=author.system_prompt)
 
 
 @router.post("/api/projects/{slug}/entities/world")
@@ -446,8 +447,10 @@ def suggest_character_reveal(slug: str, name: str, req: SuggestRevealRequest) ->
     if character is None:
         raise HTTPException(404, f"No character named {name!r}")
     try:
+        author = get_author(bible)
         return character_builder.suggest_reveal(
-            bible, character, req.unlock_chapter_num, req.section, req.prompt
+            bible, character, req.unlock_chapter_num, req.section, req.prompt,
+            voice_prompt=author.system_prompt,
         )
     except AIOutputError as exc:
         logger.exception("Suggest reveal failed for project %r character %r", slug, name)
@@ -482,7 +485,8 @@ def draft_character_sections(slug: str, name: str) -> dict[str, Any]:
     if character is None:
         raise HTTPException(404, f"No character named {name!r}")
     try:
-        sections = character_builder.draft_sections(bible, character)
+        author = get_author(bible)
+        sections = character_builder.draft_sections(bible, character, voice_prompt=author.system_prompt)
     except AIOutputError as exc:
         logger.exception("Draft sections failed for project %r character %r", slug, name)
         raise HTTPException(502, f"The AI returned an unexpected response ({exc}) - try again.")
@@ -511,7 +515,10 @@ def resync_character_sections(slug: str, name: str, req: ResyncSectionsRequest) 
     if character is None:
         raise HTTPException(404, f"No character named {name!r}")
     try:
-        sections = character_builder.resync_sections(bible, character, req.new_facts, req.chapter_num)
+        author = get_author(bible)
+        sections = character_builder.resync_sections(
+            bible, character, req.new_facts, req.chapter_num, voice_prompt=author.system_prompt
+        )
     except AIOutputError as exc:
         logger.exception("Resync sections failed for project %r character %r", slug, name)
         raise HTTPException(502, f"The AI returned an unexpected response ({exc}) - try again.")
@@ -562,7 +569,11 @@ def revise_entity(slug: str, kind: str, name: str, req: InstructionRequest) -> d
 
     field = StoryBible.ENTITY_TEXT_FIELD[kind]
     text = entity[field]
-    new_text = reviser.revise(f"a {bible._singular(kind)} bible entry named {name}", text, req.instruction)
+    author = get_author(bible)
+    new_text = reviser.revise(
+        f"a {bible._singular(kind)} bible entry named {name}", text, req.instruction,
+        voice_prompt=author.system_prompt,
+    )
     revision = bible.add_entity_revision(kind, name, new_text, instruction=req.instruction)
     compacted_count = maybe_compact_history(bible, entity["history"], f"{bible._singular(kind).title()} {name!r}")
     return {**revision, "diff": word_diff(text, new_text), "compacted_count": compacted_count}

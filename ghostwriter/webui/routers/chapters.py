@@ -31,6 +31,7 @@ router = APIRouter(tags=["chapters"])
 
 class InstructionRequest(BaseModel):
     instruction: str
+    idea_id: int | None = None
 
 
 class ApproveRequest(BaseModel):
@@ -135,7 +136,7 @@ def draft_chapter_status(slug: str, chapter_num: int, job_id: str) -> dict[str, 
 
 
 @with_bible_lock
-def _run_revise_job(job_id: str, slug: str, chapter_num: int, instruction: str) -> None:
+def _run_revise_job(job_id: str, slug: str, chapter_num: int, instruction: str, idea_id: int | None = None) -> None:
     job = _revise_jobs.get(job_id)
     try:
         bible = load_bible(slug)
@@ -152,14 +153,17 @@ def _run_revise_job(job_id: str, slug: str, chapter_num: int, instruction: str) 
         job["research_proposals"] = research_notes or []
 
         job["phase"] = "revising"
+        author = get_author(bible)
         new_text = reviser.revise(
             f"chapter {chapter_num} of the novel", text, instruction,
             on_delta=lambda partial: job.__setitem__("partial_text", partial),
-            research_notes=research_notes,
+            research_notes=research_notes, voice_prompt=author.system_prompt,
         )
         if entry.get("title"):
             bible.upsert_chapter(chapter_num, title=entry["title"])
-        revision = bible.add_chapter_revision(chapter_num, new_text, source="instruction", instruction=instruction)
+        revision = bible.add_chapter_revision(
+            chapter_num, new_text, source="instruction", instruction=instruction, idea_id=idea_id
+        )
         ch = bible.get_chapter(chapter_num)
         compacted_count = maybe_compact_history(bible, ch["history"], f"Chapter {chapter_num}")
         job["result"] = {**revision, "diff": word_diff(text, new_text), "compacted_count": compacted_count}
@@ -182,7 +186,7 @@ def revise_chapter(slug: str, chapter_num: int, req: InstructionRequest) -> dict
         "partial_text": "", "phase": "revising", "research_proposals": [],
     })
     threading.Thread(
-        target=_run_revise_job, args=(job_id, slug, chapter_num, req.instruction), daemon=True
+        target=_run_revise_job, args=(job_id, slug, chapter_num, req.instruction, req.idea_id), daemon=True
     ).start()
     return {"job_id": job_id}
 
@@ -307,8 +311,9 @@ def _run_finalize_job(job_id: str, slug: str, chapter_num: int, history_id: int)
         advance("finalize_summarize")
         summary = editor.summarize(bible, chapter_num, polished)
         with bible.batch_save():
-            bible.approve_chapter(chapter_num, polished)
+            resolved_ideas = bible.approve_chapter(chapter_num, polished)
             bible.upsert_chapter(chapter_num, summary=summary, word_count=len(polished.split()), continuity_issues=issues)
+        job["resolved_ideas"] = resolved_ideas
 
         # From here on, the chapter itself is already approved and saved above
         # (text, summary, word_count, continuity_issues) - these remaining
@@ -343,16 +348,15 @@ def _run_finalize_job(job_id: str, slug: str, chapter_num: int, history_id: int)
             job["thread_proposals"] = thread_planner.propose_from_chapter(bible, chapter_num, polished)
         except Exception as exc:
             sync_errors.append(f"Thread sync: {exc}")
-        try:
-            job["resolve_proposals"] = thread_planner.propose_resolutions(bible, chapter_num, polished)
-        except Exception as exc:
-            sync_errors.append(f"Thread resolution sync: {exc}")
 
         advance("outline_sync")
         try:
             entry = bible.outline_entry(chapter_num)
             if entry is not None:
-                entry = outliner.regenerate_chapter(bible, chapter_num, final_text=polished)
+                sync_author = get_author(bible)
+                entry = outliner.regenerate_chapter(
+                    bible, chapter_num, final_text=polished, voice_prompt=sync_author.system_prompt
+                )
                 if entry.get("title"):
                     bible.upsert_chapter(chapter_num, title=entry["title"])
         except Exception as exc:
@@ -392,7 +396,7 @@ def start_approve_chapter(slug: str, chapter_num: int, req: ApproveRequest) -> d
         "timeline_proposals": [],
         "timeline_retirements": [],
         "thread_proposals": [],
-        "resolve_proposals": [],
+        "resolved_ideas": [],
         "step_index": 0,
         "total_steps": len(_FINALIZE_STEPS),
         "label": _FINALIZE_STEPS[0][1],
@@ -415,7 +419,6 @@ _BIBLE_SYNC_STEPS = [
     ("bible_sync", "Checking character/faction/world bible"),
     ("timeline_sync", "Checking timeline"),
     ("thread_sync", "Checking upcoming threads"),
-    ("resolve_sync", "Checking paid-off threads"),
 ]
 
 # Separate job store from _finalize_jobs - this recovery action can be run
@@ -475,12 +478,6 @@ def _run_bible_sync_job(job_id: str, slug: str, chapter_num: int) -> None:
         except Exception as exc:
             logger.exception("Thread sync failed for project %r chapter %r", slug, chapter_num)
             errors.append(f"Thread sync: {exc}")
-        advance("resolve_sync")
-        try:
-            job["resolve_proposals"] = thread_planner.propose_resolutions(bible, chapter_num, text)
-        except Exception as exc:
-            logger.exception("Thread resolution sync failed for project %r chapter %r", slug, chapter_num)
-            errors.append(f"Thread resolution sync: {exc}")
 
         job["step_index"] = len(_BIBLE_SYNC_STEPS)
         if errors:
@@ -510,7 +507,6 @@ def sync_chapter_bible(slug: str, chapter_num: int) -> dict[str, Any]:
         "timeline_proposals": [],
         "timeline_retirements": [],
         "thread_proposals": [],
-        "resolve_proposals": [],
         "step_index": 0,
         "total_steps": len(_BIBLE_SYNC_STEPS),
         "label": _BIBLE_SYNC_STEPS[0][1],
@@ -786,10 +782,18 @@ def _run_book_ideas_job(job_id: str, slug: str) -> None:
     to approve via the universal queue), a whole-book sweep can surface
     dozens of proposals at once - forcing a click-through-each modal for all
     of them isn't "review", it's a chore. So this writes every proposal
-    straight into the idea backlog / marks resolutions directly, the same
-    way "resolve_idea" already applies on dispatch with no modal - and the
-    writer reviews/discards afterward through the ordinary idea-backlog UI
-    (edit/delete/promote), not a one-at-a-time queue."""
+    straight into the idea backlog - the writer reviews/discards afterward
+    through the ordinary idea-backlog UI (edit/delete/promote), not a
+    one-at-a-time queue.
+
+    Only plants new threads (propose_from_chapter); does NOT auto-resolve
+    them. An earlier version also ran propose_resolutions() and wrote
+    status="resolved" directly whenever the LLM judged a chapter "paid off"
+    a thread - with no link back to any real writer action, that guess was
+    too permissive and silently mass-resolved unrelated ideas. Resolution
+    now only ever happens via an explicit writer action: integrating an idea
+    into a chapter/outline entry and then finalizing it (see
+    pendingIdeaIntegration in editor.js)."""
     job = _ideas_book_jobs.get(job_id)
     try:
         bible = load_bible(slug)
@@ -801,7 +805,6 @@ def _run_book_ideas_job(job_id: str, slug: str) -> None:
         job["total_steps"] = len(chapters) or 1
 
         created_ideas: list[dict[str, Any]] = []
-        resolved_ideas: list[dict[str, Any]] = []
         errors: list[str] = []
         for i, ch in enumerate(chapters):
             chapter_num = ch["chapter_num"]
@@ -813,20 +816,14 @@ def _run_book_ideas_job(job_id: str, slug: str) -> None:
                     idea = bible.add_idea(
                         f"Plant for Chapter {p['linked_id']}", p["note"],
                         p.get("linked_kind", "outline"), p.get("linked_id"), "planted_thread",
+                        origin_chapter=chapter_num,
                     )
                     created_ideas.append(idea)
             except Exception as exc:
                 errors.append(f"Chapter {chapter_num} planted-thread ideas: {exc}")
-            try:
-                for p in thread_planner.propose_resolutions(bible, chapter_num, text):
-                    idea = bible.update_idea(p["idea_id"], status="resolved")
-                    resolved_ideas.append(idea)
-            except Exception as exc:
-                errors.append(f"Chapter {chapter_num} thread resolutions: {exc}")
 
         job["step_index"] = job["total_steps"]
         job["created_ideas"] = created_ideas
-        job["resolved_ideas"] = resolved_ideas
         if errors:
             job["error"] = "; ".join(errors)
     except Exception as exc:
@@ -837,21 +834,21 @@ def _run_book_ideas_job(job_id: str, slug: str) -> None:
 
 @router.post("/api/projects/{slug}/ideas-book-sweep")
 def ideas_book_sweep(slug: str) -> dict[str, Any]:
-    """Whole-book idea sweep: runs the Thread Planner's forward-seeding and
-    payoff-resolution passes over every drafted/finalized chapter in book
-    order, instead of only at finalize time for whichever single chapter was
-    just approved. Proposals are written straight to the idea backlog (see
-    _run_book_ideas_job) - the writer reviews/discards them afterward via the
-    ordinary idea-backlog UI, not a one-at-a-time approval queue. Distinct
-    from Continuity's book sweep (fact correctness) and Critique's
-    (craft/pacing) - this one is about setups and payoffs the writer hasn't
-    placed yet."""
+    """Whole-book idea sweep: runs the Thread Planner's forward-seeding pass
+    over every drafted/finalized chapter in book order, instead of only at
+    finalize time for whichever single chapter was just approved. Proposals
+    are written straight to the idea backlog (see _run_book_ideas_job) - the
+    writer reviews/discards them afterward via the ordinary idea-backlog UI,
+    not a one-at-a-time approval queue. Distinct from Continuity's book
+    sweep (fact correctness) and Critique's (craft/pacing) - this one is
+    about setups the writer hasn't placed yet. Does not resolve ideas - see
+    _run_book_ideas_job's docstring."""
     bible = load_bible(slug)
     if not any(ch.get("final") or current_chapter_text(ch) for ch in bible.data.get("chapters", [])):
         raise HTTPException(400, "No drafted chapters yet")
 
     job_id = _ideas_book_jobs.create({
-        "created_ideas": [], "resolved_ideas": [],
+        "created_ideas": [],
         "step_index": 0, "total_steps": 1, "label": "Starting...",
     })
     threading.Thread(target=_run_book_ideas_job, args=(job_id, slug), daemon=True).start()

@@ -33,7 +33,8 @@ Always respond with ONLY a JSON object with two keys: "blurb" and
 class BlurbAgent(Agent):
     system_prompt = SYSTEM_PROMPT
 
-    def generate(self, bible: StoryBible) -> dict[str, str]:
+    def generate(self, bible: StoryBible, voice_prompt: str | None = None) -> dict[str, str]:
+        system_prompt = f"{voice_prompt}\n\n{self.system_prompt}" if voice_prompt else self.system_prompt
         word_count = sum(ch.get("word_count", 0) for ch in bible.data.get("chapters", []))
         bio_line = f"Author bio: {bible.data['about_author']}" if bible.data.get("about_author") else "Author bio: (none given - omit the bio line)"
         prompt = f"""Title: {bible.data['title']}
@@ -51,7 +52,7 @@ Outline (for context only - do not spoil the ending in either output):
 
 Write a back-cover blurb and a query letter for this book. Respond with
 ONLY a JSON object: {{"blurb": "...", "query_letter": "..."}}."""
-        result = self.ask_json_object(prompt)
+        result = self.ask_json_object(prompt, system_prompt=system_prompt)
         blurb = result.get("blurb")
         query_letter = result.get("query_letter")
         return {

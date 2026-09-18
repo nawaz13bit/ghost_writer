@@ -1,6 +1,8 @@
 """Lifecycle control for the local llama.cpp server (start/stop/status)."""
 from __future__ import annotations
 
+import os
+import string
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -8,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ghostwriter.config import _find_server_exe_in, available_models, set_folders, set_model
+from ghostwriter.config import _find_server_exe_in, _model_family, available_models, set_folders, set_model
 from ghostwriter.llm_client import cancel_all_calls
 from ghostwriter.llm_server_launcher import build_command as build_llama_command
 from ghostwriter.webui.state import cfg, llm
@@ -83,12 +85,58 @@ def llm_models() -> dict[str, Any]:
     return {"models": available_models(cfg)}
 
 
+@router.get("/browse")
+def llm_browse(path: str | None = None, mode: str = "dir") -> dict[str, Any]:
+    """Lists a filesystem location for the Settings > Local LLM folder/file
+    pickers. The UI is a plain browser tab (no Electron/native shell), so a
+    real OS file dialog isn't reachable from JS and <input type=file> never
+    exposes an absolute host path - this endpoint plus a browser-side list
+    modal is the local equivalent, and it works regardless of where the
+    writer happens to keep their llama.cpp build or model file. mode="dir"
+    (llama.cpp folder picker) lists only subfolders; mode="file" (model
+    picker) also lists .gguf files. No path lists Windows drive roots."""
+    if not path:
+        entries = []
+        for letter in string.ascii_uppercase:
+            root = f"{letter}:\\"
+            if os.path.exists(root):
+                entries.append({"name": root, "path": root, "is_dir": True})
+        return {"cwd": None, "parent": None, "entries": entries}
+
+    p = Path(path)
+    if not p.is_dir():
+        raise HTTPException(400, f"Not a folder: {path}")
+
+    entries: list[dict[str, Any]] = []
+    try:
+        with os.scandir(p) as it:
+            for entry in it:
+                try:
+                    is_dir = entry.is_dir()
+                except OSError:
+                    continue
+                if is_dir:
+                    entries.append({"name": entry.name, "path": entry.path, "is_dir": True})
+                elif mode == "file" and entry.name.lower().endswith(".gguf"):
+                    entries.append({"name": entry.name, "path": entry.path, "is_dir": False})
+    except PermissionError:
+        raise HTTPException(403, f"Can't access: {path}")
+
+    entries.sort(key=lambda e: (e["is_dir"] is False, e["name"].lower()))
+    resolved = str(p.resolve())
+    parent_path = p.resolve().parent
+    parent = str(parent_path) if str(parent_path) != resolved else None
+    return {"cwd": resolved, "parent": parent, "entries": entries}
+
+
 @router.get("/folders")
 def llm_folders() -> dict[str, Any]:
     return {
         "llama_cpp_dir": cfg["llama"].get("llama_cpp_dir"),
         "models_dir": cfg["llama"].get("models_dir"),
         "server_exe": cfg["llama"].get("server_exe"),
+        "model_path": cfg["llama"].get("model_path"),
+        "draft_model_path": cfg["llama"].get("draft_model_path"),
     }
 
 
@@ -148,15 +196,19 @@ class ModelSwitchRequest(BaseModel):
 
 @router.post("/model")
 def llm_switch_model(body: ModelSwitchRequest) -> dict[str, Any]:
-    """Switches the active model_path (and, when the new model isn't the same
-    family as the old one, clears draft_model_path - the current MTP
-    speculative-decoding draft model was built specifically for the Gemma
-    main model and would misbehave or crash the server if paired with a
-    different architecture like Qwen or Phi). Requires the server to be
-    stopped first so the running process's actual loaded model never
-    disagrees with what cfg says. Updates the shared cfg dict in place (so
-    the next /api/llm/start picks it up immediately) and persists to
-    config.yaml so the choice survives a webui restart."""
+    """Switches the active model_path. Requires the server to be stopped first
+    so the running process's actual loaded model never disagrees with what
+    cfg says. Updates the shared cfg dict in place (so the next
+    /api/llm/start picks it up immediately) and persists to config.local.yaml
+    so the choice survives a webui restart. Accepts any .gguf file the
+    writer browsed to directly (see /api/llm/browse) rather than restricting
+    to available_models()'s auto-discovered list. The writer picks the main
+    model and the draft/MTP model independently via two separate loaders
+    (see /api/llm/draft-model) rather than this endpoint guessing a pairing -
+    if the newly picked main model's guessed family (see _model_family())
+    disagrees with the currently-set draft model's, the mismatched draft is
+    cleared automatically since loading it would misbehave or crash the
+    server."""
     global _llama_process
     if llm.is_up() or (_llama_process is not None and _llama_process.poll() is None):
         raise HTTPException(409, "Stop the LLM server before switching models.")
@@ -165,14 +217,11 @@ def llm_switch_model(body: ModelSwitchRequest) -> dict[str, Any]:
     if not path.is_file() or path.suffix.lower() != ".gguf":
         raise HTTPException(400, "Not a valid .gguf model file.")
     resolved = str(path.resolve())
-    known = {m["path"] for m in available_models(cfg)}
-    if resolved not in known:
-        raise HTTPException(400, "Not one of the available models.")
 
     current_draft = cfg["llama"].get("draft_model_path")
-    same_family = bool(current_draft) and (
-        ("gemma" in Path(resolved).name.lower()) == ("gemma" in Path(current_draft).name.lower())
-    )
+    new_family = _model_family(path.name)
+    current_draft_family = _model_family(Path(current_draft).name) if current_draft else None
+    same_family = bool(current_draft) and (new_family is None or new_family == current_draft_family)
     new_draft = current_draft if same_family else None
 
     cfg["llama"]["model_path"] = resolved
@@ -187,6 +236,47 @@ def llm_switch_model(body: ModelSwitchRequest) -> dict[str, Any]:
         "draft_model_path": new_draft,
         "cleared_draft": bool(current_draft) and new_draft is None,
     }
+
+
+class DraftModelRequest(BaseModel):
+    path: str | None = None
+
+
+@router.post("/draft-model")
+def llm_set_draft_model(body: DraftModelRequest) -> dict[str, Any]:
+    """Sets (or, with path=None/empty, clears) the speculative-decoding
+    draft/MTP model independently of the main model - a second explicit
+    loader rather than guessing a pairing from folder siblings or filenames,
+    since that guess can be wrong when a folder holds leftovers from more
+    than one model family. Warns (via a "family_mismatch" hint in the
+    response, not an error - the writer explicitly chose this pairing) when
+    the picked file's guessed family disagrees with the current main
+    model's, since a mismatched draft model will misbehave or crash the
+    server. Requires the server to be stopped first, same as /model."""
+    global _llama_process
+    if llm.is_up() or (_llama_process is not None and _llama_process.poll() is None):
+        raise HTTPException(409, "Stop the LLM server before changing the draft model.")
+
+    draft_path = (body.path or "").strip() or None
+    family_mismatch = False
+
+    if draft_path:
+        path = Path(draft_path)
+        if not path.is_file() or path.suffix.lower() != ".gguf":
+            raise HTTPException(400, "Not a valid .gguf model file.")
+        draft_path = str(path.resolve())
+
+        model_path = cfg["llama"].get("model_path")
+        draft_family = _model_family(path.name)
+        main_family = _model_family(Path(model_path).name) if model_path else None
+        family_mismatch = bool(draft_family and main_family and draft_family != main_family)
+
+    cfg["llama"]["draft_model_path"] = draft_path
+    if not draft_path:
+        cfg["llama"].pop("draft_model_path", None)
+
+    set_model(cfg["llama"].get("model_path", ""), draft_model_path=draft_path)
+    return {"draft_model_path": draft_path, "family_mismatch": family_mismatch}
 
 
 @router.post("/start")

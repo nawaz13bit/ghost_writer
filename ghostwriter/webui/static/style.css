@@ -268,7 +268,7 @@ body {
   margin-top: 0.6rem;
 }
 .settings-row:first-of-type { margin-top: 0; }
-.settings-row:has(#llm-models-folder) { align-items: flex-end; }
+.settings-row:has(#llm-cpp-folder), .settings-row:has(#llm-model-file) { align-items: flex-end; }
 button.danger { color: var(--del-fg); border-color: var(--del-fg); }
 button.danger:hover { background: var(--del-bg); }
 
@@ -307,6 +307,12 @@ button.danger:hover { background: var(--del-bg); }
 .dropdown-menu button { text-align: left; background: transparent; border: none; padding: 0.42rem 0.6rem; border-radius: 6px; color: var(--fg); }
 .dropdown-menu button:hover { background: var(--canvas-bg); border-color: transparent; }
 .dropdown-menu hr { border: none; border-top: 1px solid var(--border); margin: 0.25rem 0; width: 100%; }
+
+#browse-list { display: flex; flex-direction: column; gap: 0.1rem; max-height: 45vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 0.3rem; }
+.browse-item { display: block; width: 100%; text-align: left; background: transparent; border: none; padding: 0.35rem 0.5rem; border-radius: 6px; color: var(--fg); font-size: 0.85rem; cursor: pointer; }
+.browse-item:hover { background: var(--canvas-bg); }
+.browse-item.is-file { opacity: 0.85; }
+.browse-item-empty { padding: 0.42rem 0.6rem; color: var(--muted); font-size: 0.85rem; }
 #status-msg {
   position: fixed;
   bottom: 1rem;
@@ -727,6 +733,7 @@ del { background: var(--del-bg); color: var(--del-fg); text-decoration: line-thr
 .sb-leaf-idea, .ms-idea-badge, .editor-idea-badge { flex-shrink: 0; font-size: 0.78rem; cursor: default; }
 .sb-leaf-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-empty { color: var(--muted); font-size: 0.8rem; padding: 0.2rem 0.4rem 0.2rem 1.5rem; }
+.sb-idea-sweep-row { color: var(--muted); font-style: italic; border-bottom: 1px solid var(--border); margin-bottom: 0.15rem; }
 .sb-act-heading { display: flex; align-items: center; gap: 0.35rem; font-family: var(--font-mono); font-size: 0.65rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted-faint); padding: 0.3rem 0.4rem 0.15rem 0.6rem; cursor: pointer; }
 .sb-act-caret { flex-shrink: 0; width: 1rem; text-align: center; }
 .sb-act-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

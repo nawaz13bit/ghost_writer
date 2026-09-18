@@ -8,11 +8,9 @@ This agent only PROPOSES - it never writes to the bible itself. Proposals
 become ordinary idea-backlog entries (category="planted_thread") through the
 same create/review queue as every other AI change.
 
-It also looks BACKWARD: propose_resolutions() classifies which already-open
-planted-thread ideas a just-finished chapter pays off, so the backlog doesn't
-accumulate stale threads forever. Those proposals are review-gated the same
-way - they only mark an idea resolved once the writer approves it via the
-universal queue.
+It does not resolve ideas - an idea is only ever marked resolved when the
+writer explicitly integrates it into a chapter/outline entry and that entry
+is finalized (see pendingIdeaIntegration in editor.js).
 """
 from __future__ import annotations
 
@@ -50,9 +48,19 @@ class ThreadPlannerAgent(Agent):
         """Returns a list of proposed planted-thread notes for the writer to
         review - does not touch the bible. Each item: {note, characters,
         linked_kind: "outline", linked_id}."""
+        # Skip chapters that already have a planted-thread seed, resolved or
+        # not - without this, re-running a finalize/book-sweep over the same
+        # chapters (the book sweep in particular re-walks every finalized
+        # chapter each time it's run) keeps re-proposing plants for a chapter
+        # whose earlier plant was already resolved, piling up duplicate ideas.
+        already_seeded = {
+            i["linked_id"] for i in bible.data["ideas"]
+            if i.get("category") == "planted_thread"
+            and i.get("linked_kind") == "outline"
+        }
         upcoming = [
             e for e in sorted(bible.data["outline"], key=lambda o: o["chapter_num"])
-            if e["chapter_num"] > chapter_num
+            if e["chapter_num"] > chapter_num and e["chapter_num"] not in already_seeded
         ][:LOOKAHEAD_CHAPTERS]
         if not upcoming:
             return []
@@ -121,63 +129,10 @@ chapters above. Respond with ONLY a JSON array like:
             })
         return proposals
 
-    def propose_resolutions(self, bible: StoryBible, chapter_num: int, text: str) -> list[dict]:
-        """Returns a list of open planted-thread ideas this just-finished
-        chapter appears to pay off, for the writer to review - does not touch
-        the bible. Each item: {idea_id, title, reason}.
-
-        Only considers threads seeded toward this exact chapter_num (i.e.
-        linked_id == chapter_num, the chapter propose_from_chapter originally
-        targeted) - a thread paid off earlier or later than planned is a rarer
-        case left to the general idea backlog / manual resolution."""
-        threads = [
-            i for i in bible.data["ideas"]
-            if i.get("category") == "planted_thread"
-            and i.get("linked_kind") == "outline"
-            and i.get("linked_id") == chapter_num
-            and i.get("status", "open") == "open"
-        ]
-        if not threads:
-            return []
-
-        threads_brief = "\n".join(f"- id {t['id']}: {t['notes'] or t['title']}" for t in threads)
-
-        prompt = f"""Planted threads that were seeded earlier for this chapter to pay off:
-{threads_brief}
-
---- CHAPTER {chapter_num} (just finished) ---
-{text}
---- END CHAPTER ---
-
-For each planted thread above, decide whether this chapter actually pays it
-off (resolves it, brings it to a payoff, or otherwise makes it no longer an
-open setup). Respond with ONLY a JSON array of objects, one per thread you
-judge IS paid off (omit threads that are not - it is correct and expected to
-return an empty array if none are), each with keys:
-- "idea_id": the id number of the thread (from the list above)
-- "reason": 1 sentence on how/where the chapter pays it off"""
-
-        result = self.ask_json(prompt)
-        if isinstance(result, dict):
-            result = [result]
-        if not isinstance(result, list):
-            return []
-
-        valid_ids = {t["id"]: t for t in threads}
-        proposals = []
-        seen_ids: set[int] = set()
-        for item in result:
-            if not isinstance(item, dict):
-                continue
-            idea_id = item.get("idea_id")
-            if not isinstance(idea_id, int) or idea_id not in valid_ids or idea_id in seen_ids:
-                continue
-            reason = item.get("reason")
-            reason = reason.strip() if isinstance(reason, str) and reason.strip() else "Paid off by this chapter."
-            seen_ids.add(idea_id)
-            proposals.append({
-                "idea_id": idea_id,
-                "title": valid_ids[idea_id]["title"],
-                "reason": reason,
-            })
-        return proposals
+    # Resolution used to be auto-detected here (an LLM judgment call on
+    # whether a chapter's text "paid off" an open planted thread), but that
+    # guess had no link back to any real writer action and mass-resolved
+    # unrelated ideas across a whole book. Removed - an idea is now only
+    # marked resolved when the writer explicitly integrates it into a
+    # chapter/outline entry and that entry is finalized (see
+    # pendingIdeaIntegration in editor.js).

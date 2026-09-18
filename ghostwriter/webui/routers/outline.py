@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from ghostwriter.agents.base import AIOutputError
 from ghostwriter.llm_client import LLMCancelled
-from ghostwriter.webui.deps import load_bible, with_bible_lock
+from ghostwriter.webui.deps import get_author, load_bible, with_bible_lock
 from ghostwriter.webui.state import continuity_checker, outliner
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ class OutlineEditRequest(BaseModel):
     characters: list[str] | None = None
     world_refs: list[str] | None = None
     track_id: str | None = None
+    idea_id: int | None = None
 
 
 @router.post("/api/projects/{slug}/outline")
@@ -67,7 +68,8 @@ def suggest_outline_entry(slug: str, req: SuggestOutlineEntryRequest) -> dict[st
         raise HTTPException(400, "A description is required")
     bible = load_bible(slug)
     try:
-        return outliner.suggest_new_entry(bible, req.prompt, req.chapter_num)
+        author = get_author(bible)
+        return outliner.suggest_new_entry(bible, req.prompt, req.chapter_num, voice_prompt=author.system_prompt)
     except AIOutputError as exc:
         logger.exception("Outline suggest failed for project %r", slug)
         raise HTTPException(502, f"The AI returned an unexpected response ({exc}) - try again or rephrase the description.")
@@ -79,9 +81,11 @@ def suggest_outline_entry(slug: str, req: SuggestOutlineEntryRequest) -> dict[st
 @with_bible_lock
 def edit_outline_entry(slug: str, chapter_num: int, req: OutlineEditRequest) -> dict[str, Any]:
     bible = load_bible(slug)
-    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    fields = {k: v for k, v in req.model_dump().items() if v is not None and k != "idea_id"}
     try:
         entry = bible.update_outline_entry(chapter_num, **fields)
+        if req.idea_id is not None:
+            bible.link_idea_to_outline(chapter_num, req.idea_id)
     except ValueError as exc:
         raise HTTPException(404, str(exc))
     if "title" in fields and bible.get_chapter(chapter_num) is not None:
@@ -104,7 +108,10 @@ def regenerate_outline_entry(slug: str, chapter_num: int, req: RegenerateOutline
     bible = load_bible(slug)
     instruction = req.instruction.strip() if req and req.instruction and req.instruction.strip() else None
     try:
-        entry = outliner.regenerate_chapter(bible, chapter_num, extra_instruction=instruction)
+        author = get_author(bible)
+        entry = outliner.regenerate_chapter(
+            bible, chapter_num, extra_instruction=instruction, voice_prompt=author.system_prompt
+        )
         if bible.get_chapter(chapter_num) is not None:
             bible.upsert_chapter(chapter_num, title=entry["title"])
         return entry
@@ -177,7 +184,8 @@ def revise_outline(slug: str, req: ReviseOutlineRequest) -> list[dict[str, Any]]
         raise HTTPException(400, "An instruction is required")
     bible = load_bible(slug)
     try:
-        return outliner.revise_outline(bible, req.instruction)
+        author = get_author(bible)
+        return outliner.revise_outline(bible, req.instruction, voice_prompt=author.system_prompt)
     except AIOutputError as exc:
         logger.exception("Whole-outline revise failed for project %r", slug)
         raise HTTPException(502, f"The AI returned an unexpected response ({exc}) - try again or rephrase the instruction.")
@@ -252,7 +260,10 @@ def elaborate_act_summary(slug: str, name: str, req: ElaborateActRequest | None 
     bible = load_bible(slug)
     instruction = req.instruction.strip() if req and req.instruction and req.instruction.strip() else None
     try:
-        summary = outliner.elaborate_act_summary(bible, name, extra_instruction=instruction)
+        author = get_author(bible)
+        summary = outliner.elaborate_act_summary(
+            bible, name, extra_instruction=instruction, voice_prompt=author.system_prompt
+        )
     except AIOutputError as exc:
         logger.exception("Act summary elaboration failed for project %r act %r", slug, name)
         raise HTTPException(502, f"The AI returned an unexpected response ({exc}) - try again.")

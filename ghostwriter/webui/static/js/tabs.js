@@ -54,6 +54,7 @@ function applyTab() {
     showSidebar();
     selectItem("overview", "engine");
   } else if (activeTab === "continuity") {
+    showSidebar();
     selectItem("overview", "continuity");
   } else if (activeTab === "timeline") {
     $("tab-panel-timeline").classList.remove("hidden");

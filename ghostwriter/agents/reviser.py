@@ -30,8 +30,13 @@ class ReviserAgent(Agent):
 
     def revise(
         self, context_label: str, text: str, instruction: str, on_delta=None,
-        research_notes: list[dict] | None = None,
+        research_notes: list[dict] | None = None, voice_prompt: str | None = None,
     ) -> str:
+        # voice_prompt lets a caller (chapter revise) ground the edit in the
+        # project's author persona(s) instead of this agent's generic,
+        # voice-agnostic prompt - bible/character/idea edits don't need it,
+        # but chapter prose should keep sounding like the same author.
+        system_prompt = f"{voice_prompt}\n\n{self.system_prompt}" if voice_prompt else self.system_prompt
         research_section = ""
         if research_notes:
             notes_block = "\n\n".join(
@@ -55,7 +60,7 @@ Instruction: {instruction}
 Apply this instruction and output only the revised text."""
         max_tokens = max(self.llm.default_max_tokens, int(len(text.split()) * 2.5))
         if on_delta is not None:
-            result = self.ask_stream(prompt, on_delta, max_tokens=max_tokens)
+            result = self.llm.chat_stream(system_prompt, prompt, on_delta, max_tokens=max_tokens)
         else:
-            result = self.ask(prompt, max_tokens=max_tokens)
+            result = self.llm.chat(system_prompt, prompt, max_tokens=max_tokens)
         return strip_echoed_delimiters(result)

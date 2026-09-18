@@ -85,29 +85,33 @@
       <h3>Local LLM</h3>
       <div class="settings-row">
         <span id="llm-indicator" class="llm-unknown" title="Local LLM server status">LLM: checking...</span>
-        <button id="btn-start-llm" class="hidden">Start LLM server</button>
-        <button id="btn-stop-llm" class="hidden">Stop LLM server</button>
-      </div>
-      <div class="settings-row">
-        <label>Model
-          <select id="llm-model"></select>
-        </label>
-        <button id="btn-switch-model" title="Requires the LLM server to be stopped first">Switch Model</button>
       </div>
       <div class="settings-row">
         <label>llama.cpp folder
-          <input type="text" id="llm-cpp-folder" placeholder="e.g. D:\code\llama-b9827-bin-win-cuda-13.3-x64">
+          <input type="text" id="llm-cpp-folder" placeholder="Browse to the folder with your llama-server executable" readonly>
         </label>
+        <button id="btn-browse-cpp-folder" title="Requires the LLM server to be stopped first">Browse...</button>
       </div>
       <div class="settings-row">
-        <label>Models folder
-          <input type="text" id="llm-models-folder" placeholder="e.g. D:\code\models">
+        <label>Model file
+          <input type="text" id="llm-model-file" placeholder="Browse to a .gguf model file" readonly>
         </label>
-        <button id="btn-save-llm-folders" title="Requires the LLM server to be stopped first">Save Folders</button>
+        <button id="btn-browse-model-file" title="Requires the LLM server to be stopped first">Browse...</button>
       </div>
-      <p class="modal-hint">Leave a field blank to fall back to config.local.yaml / the repo's own
-        <code>models/</code> folder. Saved to config.local.yaml (personal, gitignored) so this
-        doesn't overwrite anyone else's folders. Changes take effect on the next server start.</p>
+      <div class="settings-row">
+        <label>Draft/MTP model <span class="modal-hint">(optional, for speculative decoding)</span>
+          <input type="text" id="llm-draft-model-file" placeholder="Browse to a .gguf draft/MTP model file" readonly>
+        </label>
+        <button id="btn-browse-draft-model-file" title="Requires the LLM server to be stopped first">Browse...</button>
+        <button id="btn-clear-draft-model-file" title="Clear the draft/MTP model">Clear</button>
+      </div>
+      <div class="settings-row">
+        <button id="btn-start-llm" class="hidden">Start LLM server</button>
+        <button id="btn-stop-llm" class="hidden">Stop LLM server</button>
+      </div>
+      <p class="modal-hint">Point these at your own llama.cpp build and model file(s) - no predefined folder
+        layout required. Saved to config.local.yaml (personal, gitignored) so this doesn't overwrite
+        anyone else's setup.</p>
     </section>
 
     <section class="settings-section">
@@ -172,7 +176,6 @@
       </div>
     </section>
   </div>
-  </div>
 
   <div id="tab-panel-timeline" class="hidden">
     <div id="timeline-tab-header">
@@ -192,6 +195,7 @@
       <h3>Chronology</h3>
       <div id="timeline-swimlane"></div>
     </section>
+  </div>
   </div>
 
   <div id="canvas-drawer" class="hidden">
@@ -507,6 +511,7 @@
   <div id="idea-modal" class="modal">
     <h3 id="idea-modal-title">New Idea</h3>
     <p class="modal-hint">A chapter idea you haven't placed yet - no act or chapter # needed. Once you know where it fits, promote it into the outline.</p>
+    <p id="idea-origin-note" class="modal-hint hidden"></p>
     <label>Title <input id="idea-title"></label>
     <label>Notes <textarea id="idea-notes" rows="6" placeholder="Whatever you've got - a beat, a line of dialogue, why it matters."></textarea></label>
     <label>Relates to
@@ -514,9 +519,27 @@
       <select id="idea-relates-to"><option value="">None</option></select>
     </label>
     <label class="checkbox-label"><input type="checkbox" id="idea-is-thread"> Planted thread (a setup this idea's linked chapter should plant, to be paid off later)</label>
+    <div id="idea-modal-actions" class="modal-actions hidden">
+      <button id="idea-integrate-chapter-btn" title="Have the AI revise a drafted chapter to weave this idea in (review/approve like any other revision).">Integrate into chapter</button>
+      <button id="idea-integrate-outline-btn" title="For a chapter that isn't drafted yet: fold this idea's note into that outline entry's summary now.">Integrate into outline</button>
+      <button id="idea-promote-btn" title="Give this idea an act and chapter # to place it in the outline. It's removed from the idea backlog once placed.">Promote to outline</button>
+    </div>
     <div class="modal-actions">
       <button id="idea-cancel">Cancel</button>
       <button id="idea-save" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="browse-modal-backdrop" class="hidden modal-backdrop">
+  <div id="browse-modal" class="modal">
+    <h3 id="browse-modal-title">Browse</h3>
+    <div id="browse-path" class="modal-hint"></div>
+    <input type="text" id="browse-filter" placeholder="Filter...">
+    <div id="browse-list"></div>
+    <div class="modal-actions">
+      <button id="browse-cancel">Cancel</button>
+      <button id="browse-use-folder" class="primary hidden">Use this folder</button>
     </div>
   </div>
 </div>
@@ -530,6 +553,19 @@
     <div class="modal-actions">
       <button id="ii-cancel">Cancel</button>
       <button id="ii-integrate" class="primary">Integrate</button>
+    </div>
+  </div>
+</div>
+
+<div id="integrate-idea-outline-modal-backdrop" class="hidden modal-backdrop">
+  <div id="integrate-idea-outline-modal" class="modal">
+    <h3 id="integrate-idea-outline-modal-title">Integrate Idea into Outline</h3>
+    <p class="modal-hint">For a chapter that hasn't been drafted yet: folds this idea's note into that outline entry's summary now, so it's there when you draft. The idea itself stays open until that chapter is drafted and finalized.</p>
+    <label>Chapter <select id="iio-chapter"></select></label>
+    <label>Note to add to the outline summary <textarea id="iio-note" rows="4"></textarea></label>
+    <div class="modal-actions">
+      <button id="iio-cancel">Cancel</button>
+      <button id="iio-integrate" class="primary">Integrate</button>
     </div>
   </div>
 </div>

@@ -1542,7 +1542,7 @@ export async function saveManualEdit() {
   renderEditor();
   if (kind === "chapter") refreshChapterMeta(id);
   markTouched(kind, id, kind === "chapter" ? `Chapter ${id}` : `${kindLabel(kind)}: ${id}`);
-  const queued = finalizeJob && queueBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals, finalizeJob.thread_proposals, finalizeJob.resolve_proposals, finalizeJob.timeline_retirements);
+  const queued = finalizeJob && queueBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals, finalizeJob.thread_proposals, finalizeJob.timeline_retirements);
   if (queued) {
     const first = state.universalQueue[0];
     const errNote = finalizeJob.error ? ` (finalize hit an error partway through: ${finalizeJob.error}, but earlier-step updates are still queued below)` : "";
@@ -1558,12 +1558,6 @@ export async function saveManualEdit() {
     setStatus(`${kind === "chapter" ? "Saved and finalized." : "Saved."}${compactionNote(revision)}`);
   }
 }
-
-// Set by integrateIdeaIntoChapter right before its revise call; consumed by
-// approveSelected once the writer actually approves that chapter's revision
-// diff - the idea is only "implemented" (and cleared off the open backlog)
-// once the integrated prose is accepted, not merely drafted for review.
-let pendingIdeaIntegration = null;
 
 async function approveSelected(kind, record, selectedEntry) {
   const { id } = state.selection;
@@ -1606,30 +1600,28 @@ async function approveSelected(kind, record, selectedEntry) {
   renderEditor();
   if (kind === "chapter") refreshChapterMeta(id);
   markTouched(kind, id, kind === "chapter" ? `Chapter ${id} (approved)` : `${kindLabel(kind)}: ${id} (approved)`);
+  // Idea resolution is now decided server-side (approve_chapter resolves
+  // any ideas pending on this chapter or its outline entry) - see
+  // add_chapter_revision's idea_id param and link_idea_to_outline in
+  // story_bible.py. This just surfaces what the server already resolved,
+  // instead of separately deciding it client-side (the old pendingIdeaIntegration
+  // flag was lost on any browser refresh during the slow finalize pipeline).
   let integratedIdeaNote = "";
-  if (kind === "chapter" && pendingIdeaIntegration && pendingIdeaIntegration.chapterNum === id) {
-    const { ideaId, ideaTitle } = pendingIdeaIntegration;
-    pendingIdeaIntegration = null;
-    await api(`/api/projects/${encodeURIComponent(state.slug)}/ideas/${ideaId}/edit`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "resolved" }),
-    });
-    await refreshBible();
-    renderSidebar();
-    integratedIdeaNote = ` Idea "${ideaTitle}" marked resolved.`;
+  if (finalizeJob && finalizeJob.resolved_ideas && finalizeJob.resolved_ideas.length) {
+    const titles = finalizeJob.resolved_ideas.map((i) => `"${i.title}"`).join(", ");
+    integratedIdeaNote = ` Idea${finalizeJob.resolved_ideas.length === 1 ? "" : "s"} ${titles} marked resolved.`;
   }
   if (finalizeJob && bulkAutoSaveMode) {
     // Whole-book bulk pass (fixAllContinuityFlags/fixAllChapterContinuityIssues/
     // finalizeOpenChapters): apply these fact-extraction proposals directly
     // instead of queuing them for review, so the batch doesn't stop here - the
     // writer's own manual, chapter-by-chapter approve (below) keeps the gate.
-    const applied = await autoApplyBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals, finalizeJob.thread_proposals, finalizeJob.resolve_proposals, finalizeJob.timeline_retirements);
+    const applied = await autoApplyBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals, finalizeJob.thread_proposals, finalizeJob.timeline_retirements);
     const errNote = finalizeJob.error ? ` (finalize hit an error partway through: ${finalizeJob.error})` : "";
     const appliedNote = applied ? ` ${applied} bible/timeline update${applied === 1 ? "" : "s"} applied.` : "";
     setStatus(`Finalized.${appliedNote}${errNote}${integratedIdeaNote}`, !!finalizeJob.error);
   } else {
-    const queued = finalizeJob && queueBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals, finalizeJob.thread_proposals, finalizeJob.resolve_proposals, finalizeJob.timeline_retirements);
+    const queued = finalizeJob && queueBibleProposals(finalizeJob.bible_proposals, id, finalizeJob.timeline_proposals, finalizeJob.thread_proposals, finalizeJob.timeline_retirements);
     if (queued) {
       const first = state.universalQueue[0];
       const errNote = finalizeJob.error ? ` (finalize hit an error partway through: ${finalizeJob.error}, but earlier-step updates are still queued below)` : "";
@@ -1732,8 +1724,8 @@ export async function syncChapterBible(chapterNum) {
   const job = await pollDeterminateJobKeepErrors(
     `/api/projects/${encodeURIComponent(state.slug)}/chapters/${chapterNum}/bible-sync/status/${job_id}`
   );
-  const { bible_proposals, timeline_proposals, thread_proposals, resolve_proposals, timeline_retirements, error } = job;
-  const queued = queueBibleProposals(bible_proposals, chapterNum, timeline_proposals, thread_proposals, resolve_proposals, timeline_retirements);
+  const { bible_proposals, timeline_proposals, thread_proposals, timeline_retirements, error } = job;
+  const queued = queueBibleProposals(bible_proposals, chapterNum, timeline_proposals, thread_proposals, timeline_retirements);
   if (queued) {
     const first = state.universalQueue[0];
     const errNote = error ? ` (hit an error partway through: ${error}, but earlier-step updates are still queued below)` : "";
@@ -1828,17 +1820,18 @@ export async function checkBookConsistency() {
   }
 }
 
-// Whole-book idea sweep: Thread Planner's forward-seeding (propose_from_chapter)
-// and payoff-resolution (propose_resolutions) passes over every drafted
-// chapter in book order, instead of only the single chapter just finalized.
-// Unlike the per-chapter version, this writes proposals straight to the idea
-// backlog server-side (no per-item approval queue - see the backend's
-// _run_book_ideas_job) since a whole-book sweep can surface far too many
-// proposals to click through one at a time; the writer reviews/discards them
-// afterward via the ordinary idea-backlog UI. Uses pollDeterminateJobKeepErrors
-// (not pollDeterminateJob) because the backend accumulates partial results
-// per-chapter even when some chapters error, and we don't want one bad
-// chapter to discard every other chapter's already-applied results.
+// Whole-book idea sweep: Thread Planner's forward-seeding
+// (propose_from_chapter) pass over every drafted chapter in book order,
+// instead of only the single chapter just finalized. Unlike the per-chapter
+// version, this writes proposals straight to the idea backlog server-side
+// (no per-item approval queue - see the backend's _run_book_ideas_job)
+// since a whole-book sweep can surface far too many proposals to click
+// through one at a time; the writer reviews/discards them afterward via the
+// ordinary idea-backlog UI. Does not resolve ideas (see _run_book_ideas_job's
+// docstring). Uses pollDeterminateJobKeepErrors (not pollDeterminateJob)
+// because the backend accumulates partial results per-chapter even when
+// some chapters error, and we don't want one bad chapter to discard every
+// other chapter's already-applied results.
 export async function ideasBookSweep() {
   if (!state.slug) return;
   setStatus("Starting whole-book idea sweep...");
@@ -1850,15 +1843,11 @@ export async function ideasBookSweep() {
   renderSidebar();
   renderEditor();
   const created = (job.created_ideas || []).length;
-  const resolved = (job.resolved_ideas || []).length;
   const errNote = job.error ? ` (hit an error partway through: ${job.error})` : "";
-  if (!created && !resolved) {
-    setStatus(job.error ? `Whole-book idea sweep failed: ${job.error}` : "Whole-book idea sweep found no new planted threads or resolutions.", !!job.error);
+  if (!created) {
+    setStatus(job.error ? `Whole-book idea sweep failed: ${job.error}` : "Whole-book idea sweep found no new planted threads.", !!job.error);
   } else {
-    const parts = [];
-    if (created) parts.push(`added ${created} new idea${created === 1 ? "" : "s"}`);
-    if (resolved) parts.push(`resolved ${resolved}`);
-    setStatus(`Whole-book idea sweep ${parts.join(" and ")} - see the Ideas backlog.${errNote}`, !!job.error);
+    setStatus(`Whole-book idea sweep added ${created} new idea${created === 1 ? "" : "s"} - see the Ideas backlog.${errNote}`, !!job.error);
   }
 }
 
@@ -2704,6 +2693,65 @@ export function openIntegrateIdeaModal(idea) {
 
 export function closeIntegrateIdeaModal() { integratingIdea = null; $("integrate-idea-modal-backdrop").classList.add("hidden"); }
 
+// Companion to openIntegrateIdeaModal/integrateIdeaIntoChapter above, for an
+// idea whose target chapter hasn't been drafted yet - there's no chapter
+// text for the AI to revise, so this folds the note into the outline entry's
+// summary instead. Resolution still only happens once that chapter is
+// eventually drafted and finalized - server-side, via the idea_id link
+// recorded now and resolved in approve_chapter (story_bible.py).
+let integratingIdeaOutline = null;
+
+export function openIntegrateIdeaOutlineModal(idea) {
+  if (!state.slug) { setStatus("Select a project first.", true); return; }
+  const draftedNums = new Set(
+    (state.bible.chapters || [])
+      .filter((c) => c.draft || (c.history && c.history.length))
+      .map((c) => c.chapter_num)
+  );
+  const undrafted = (state.bible.outline || [])
+    .filter((e) => !draftedNums.has(e.chapter_num))
+    .slice()
+    .sort((a, b) => a.chapter_num - b.chapter_num);
+  if (!undrafted.length) {
+    setStatus("No undrafted outline entries to integrate this idea into.", true);
+    return;
+  }
+  integratingIdeaOutline = idea;
+  $("integrate-idea-outline-modal-title").textContent = `Integrate Idea into Outline: ${idea.title}`;
+  const sel = $("iio-chapter");
+  sel.innerHTML = "";
+  for (const e of undrafted) {
+    const opt = document.createElement("option");
+    opt.value = e.chapter_num;
+    opt.textContent = `Chapter ${e.chapter_num}${e.title ? ": " + e.title : ""}`;
+    sel.appendChild(opt);
+  }
+  $("iio-note").value = idea.notes ? `${idea.title} - ${idea.notes}` : idea.title;
+  $("integrate-idea-outline-modal-backdrop").classList.remove("hidden");
+}
+
+export function closeIntegrateIdeaOutlineModal() { integratingIdeaOutline = null; $("integrate-idea-outline-modal-backdrop").classList.add("hidden"); }
+
+export async function integrateIdeaIntoOutline() {
+  const idea = integratingIdeaOutline;
+  const chapterNum = parseInt($("iio-chapter").value, 10);
+  const note = $("iio-note").value.trim();
+  if (!idea || !chapterNum || !note) return;
+  closeIntegrateIdeaOutlineModal();
+  setStatus(`Adding "${idea.title}" to Chapter ${chapterNum}'s outline entry...`);
+  const entry = (state.bible.outline || []).find((e) => e.chapter_num === chapterNum);
+  const summary = entry && entry.summary ? `${entry.summary}\n\n${note}` : note;
+  await api(`/api/projects/${encodeURIComponent(state.slug)}/outline/${chapterNum}/edit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ summary, idea_id: idea.id }),
+  });
+  await refreshBible();
+  renderSidebar();
+  renderEditor();
+  setStatus(`"${idea.title}" added to Chapter ${chapterNum}'s outline entry - it'll be marked resolved once that chapter is drafted and finalized.`);
+}
+
 export async function integrateIdeaIntoChapter() {
   const idea = integratingIdea;
   const chapterNum = parseInt($("ii-chapter").value, 10);
@@ -2713,13 +2761,12 @@ export async function integrateIdeaIntoChapter() {
   setStatus(`Revising Chapter ${chapterNum} to integrate "${idea.title}"...`);
   const { job_id } = await api(
     `/api/projects/${encodeURIComponent(state.slug)}/chapters/${chapterNum}/revise`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instruction }) }
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instruction, idea_id: idea.id }) }
   );
   await pollStreamJob(
     `/api/projects/${encodeURIComponent(state.slug)}/chapters/${chapterNum}/revise/status/${job_id}`,
     `Integrating idea into Chapter ${chapterNum}`
   );
-  pendingIdeaIntegration = { chapterNum, ideaId: idea.id, ideaTitle: idea.title };
   await refreshBible();
   renderSidebar();
   selectChapter(chapterNum);
@@ -2795,6 +2842,11 @@ export async function createOutlineEntry() {
 
 // -- idea backlog ---------------------------------------------------------
 let editingIdeaId = null;
+// Set alongside the idea modal's title/notes fields when the writer creates
+// (or edits) an idea whose origin_chapter is already known - e.g. a thread-
+// planner proposal, which knows what chapter it was discovered/planted in.
+// Not a form field itself since it's provenance, not something to hand-edit.
+let pendingIdeaOriginChapter = null;
 
 // "Relates to" option value packs kind+id as "kind|id" so a single <select>
 // can pick across chapters and every entity bucket at once.
@@ -2864,6 +2916,16 @@ function filterIdeaRelatesToOptions(query) {
   }
 }
 
+// Whether an idea's linked outline chapter (when it has one) has already
+// been drafted - null when the idea isn't linked to a specific chapter
+// (e.g. linked to a character/world entry, or not linked at all), since
+// there's then no single target to check.
+function ideaTargetChapterDrafted(idea) {
+  if (idea.linked_kind !== "outline" || idea.linked_id == null) return null;
+  const chapter = (state.bible.chapters || []).find((c) => c.chapter_num === idea.linked_id);
+  return !!(chapter && (chapter.draft || (chapter.history && chapter.history.length)));
+}
+
 export function openIdeaModal(idea = null) {
   if (!state.slug) { setStatus("Select a project first.", true); return; }
   editingIdeaId = idea ? idea.id : null;
@@ -2872,8 +2934,54 @@ export function openIdeaModal(idea = null) {
   $("idea-notes").value = idea ? (idea.notes || "") : "";
   $("idea-relates-search").value = "";
   $("idea-is-thread").checked = idea ? idea.category === "planted_thread" : false;
+  pendingIdeaOriginChapter = idea ? (idea.origin_chapter ?? null) : null;
+  const originEl = $("idea-origin-note");
+  if (originEl) {
+    originEl.textContent = pendingIdeaOriginChapter != null ? `Discovered while finishing Chapter ${pendingIdeaOriginChapter}.` : "";
+    originEl.classList.toggle("hidden", pendingIdeaOriginChapter == null);
+  }
   refreshIdeaRelatesToOptions(idea ? idea.linked_kind : null, idea ? idea.linked_id : null);
+
+  // Resolution-path buttons: not shown for a brand-new (unsaved) idea, or
+  // one already resolved. Otherwise, only "Integrate into chapter" if its
+  // linked chapter is drafted; otherwise only "Integrate into outline" and
+  // "Promote to outline" - a drafted chapter has prose to revise, an
+  // undrafted one doesn't.
+  const actions = $("idea-modal-actions");
+  const promoteBtn = $("idea-promote-btn");
+  const integrateChBtn = $("idea-integrate-chapter-btn");
+  const integrateOlBtn = $("idea-integrate-outline-btn");
+  const showActions = !!idea && idea.status !== "resolved";
+  actions.classList.toggle("hidden", !showActions);
+  if (showActions) {
+    const drafted = ideaTargetChapterDrafted(idea);
+    integrateChBtn.classList.toggle("hidden", drafted === false);
+    promoteBtn.classList.toggle("hidden", drafted === true);
+    integrateOlBtn.classList.toggle("hidden", drafted === true);
+  }
+
   $("idea-modal-backdrop").classList.remove("hidden");
+}
+
+export function ideaModalPromote() {
+  const idea = (state.bible.ideas || []).find((i) => i.id === editingIdeaId);
+  if (!idea) return;
+  closeIdeaModal();
+  openPromoteIdeaModal(idea);
+}
+
+export function ideaModalIntegrateChapter() {
+  const idea = (state.bible.ideas || []).find((i) => i.id === editingIdeaId);
+  if (!idea) return;
+  closeIdeaModal();
+  openIntegrateIdeaModal(idea);
+}
+
+export function ideaModalIntegrateOutline() {
+  const idea = (state.bible.ideas || []).find((i) => i.id === editingIdeaId);
+  if (!idea) return;
+  closeIdeaModal();
+  openIntegrateIdeaOutlineModal(idea);
 }
 
 export function filterIdeaRelatesTo() {
@@ -2893,6 +3001,8 @@ export async function saveIdea() {
   const linkedId = linkedKind === "outline" && linkedIdRaw != null ? parseInt(linkedIdRaw, 10) : linkedIdRaw;
   const category = $("idea-is-thread").checked ? "planted_thread" : null;
   const ideaId = editingIdeaId;
+  const originChapter = pendingIdeaOriginChapter;
+  pendingIdeaOriginChapter = null;
   closeIdeaModal();
   setStatus(ideaId ? "Saving idea..." : "Adding idea...");
   if (ideaId) {
@@ -2905,7 +3015,7 @@ export async function saveIdea() {
     await api(`/api/projects/${encodeURIComponent(state.slug)}/ideas`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, notes, linked_kind: linkedKind, linked_id: linkedId, category }),
+      body: JSON.stringify({ title, notes, linked_kind: linkedKind, linked_id: linkedId, category, origin_chapter: originChapter }),
     });
   }
   await refreshBible();
@@ -3525,66 +3635,169 @@ export async function stopLlm() {
   pollLlmStatus();
 }
 
-// Local model picker: lists every .gguf next to the configured model (plus
-// the repo's own models/ drop-in folder) so the writer can swap between
-// locally downloaded models (e.g. Gemma vs. a newly added Qwen build)
-// without hand-editing config.yaml.
-export async function loadLlmModels() {
-  const sel = $("llm-model");
-  const { models } = await api("/api/llm/models", undefined, { silent: true });
-  sel.innerHTML = "";
-  for (const m of models) {
-    const opt = document.createElement("option");
-    opt.value = m.path;
-    opt.textContent = `${m.name} (${m.size_gb} GB)`;
-    if (m.current) opt.selected = true;
-    sel.appendChild(opt);
-  }
-}
-
-export async function switchModel() {
-  const path = $("llm-model").value;
-  if (!path) return;
-  setStatus("Switching model...");
-  try {
-    const result = await api("/api/llm/model", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
-    });
-    setStatus(result.cleared_draft
-      ? "Model switched. Cleared the speculative-decoding draft model (built for a different model family)."
-      : "Model switched.");
-    await loadLlmModels();
-  } catch (err) {
-    setStatus(err.message, true);
-  }
-  pollLlmStatus();
-}
-
-// Lets the writer point at an external llama.cpp build folder and/or an
-// extra models folder from Settings, instead of hand-editing config.yaml.
+// Shows the currently configured llama.cpp folder and model file in
+// Settings, without depending on auto-discovery to find them.
 export async function loadLlmFolders() {
-  const { llama_cpp_dir, models_dir } = await api("/api/llm/folders", undefined, { silent: true });
+  const { llama_cpp_dir, model_path, draft_model_path } = await api("/api/llm/folders", undefined, { silent: true });
   $("llm-cpp-folder").value = llama_cpp_dir || "";
-  $("llm-models-folder").value = models_dir || "";
+  $("llm-model-file").value = model_path || "";
+  $("llm-draft-model-file").value = draft_model_path || "";
 }
 
-export async function saveLlmFolders() {
-  const llama_cpp_dir = $("llm-cpp-folder").value.trim();
-  const models_dir = $("llm-models-folder").value.trim();
-  setStatus("Saving folders...");
+// Browse-folder/file picker: since this UI is a plain browser tab (no
+// Electron/native shell), a real OS file dialog isn't reachable from JS, so
+// this walks the filesystem via /api/llm/browse inside an in-app modal
+// instead - works for any install layout, no predefined folders required.
+let browseMode = "dir"; // "dir" (llama.cpp folder) or "file" (model .gguf)
+let browseCwd = null;
+let browseEntries = [];
+
+function renderBrowseList() {
+  const list = $("browse-list");
+  const filter = $("browse-filter").value.trim().toLowerCase();
+  const filtered = filter
+    ? browseEntries.filter((e) => e.name.toLowerCase().includes(filter))
+    : browseEntries;
+  list.innerHTML = "";
+  if (filtered.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "browse-item-empty";
+    empty.textContent = "Nothing here.";
+    list.appendChild(empty);
+    return;
+  }
+  for (const entry of filtered) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "browse-item" + (entry.is_dir ? "" : " is-file");
+    btn.textContent = entry.is_dir ? `📁 ${entry.name}` : `📄 ${entry.name}`;
+    btn.addEventListener("click", () => entry.is_dir ? browseNavigate(entry.path) : browseSelectFile(entry.path));
+    list.appendChild(btn);
+  }
+}
+
+async function browseNavigate(path) {
+  const qs = path ? `?path=${encodeURIComponent(path)}&mode=${browseMode}` : `?mode=${browseMode}`;
+  let data;
   try {
-    await api("/api/llm/folders", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ llama_cpp_dir, models_dir }),
-    });
-    setStatus("Folders saved.");
-    await loadLlmModels();
+    data = await api(`/api/llm/browse${qs}`, undefined, { silent: true });
   } catch (err) {
     setStatus(err.message, true);
+    return;
   }
+  browseCwd = data.cwd;
+  browseEntries = data.entries;
+  if (data.parent) {
+    browseEntries = [{ name: "..", path: data.parent, is_dir: true }, ...browseEntries];
+  }
+  $("browse-path").textContent = browseCwd || "This computer";
+  $("browse-filter").value = "";
+  renderBrowseList();
+}
+
+let browseResolve = null;
+
+function closeBrowseModal(result) {
+  $("browse-modal-backdrop").classList.add("hidden");
+  if (browseResolve) {
+    const resolve = browseResolve;
+    browseResolve = null;
+    resolve(result);
+  }
+}
+
+async function browseSelectFile(path) {
+  closeBrowseModal(path);
+}
+
+function openBrowseModal(mode, title) {
+  browseMode = mode;
+  browseCwd = null;
+  browseEntries = [];
+  $("browse-modal-title").textContent = title || (mode === "dir" ? "Choose your llama.cpp folder" : "Choose a model file (.gguf)");
+  $("browse-use-folder").classList.toggle("hidden", mode !== "dir");
+  $("browse-modal-backdrop").classList.remove("hidden");
+  browseNavigate(null);
+  return new Promise((resolve) => { browseResolve = resolve; });
+}
+
+export function wireBrowseModal() {
+  $("browse-cancel").addEventListener("click", () => closeBrowseModal(null));
+  $("browse-use-folder").addEventListener("click", () => closeBrowseModal(browseCwd));
+  $("browse-filter").addEventListener("input", renderBrowseList);
+
+  $("btn-browse-cpp-folder").addEventListener("click", async () => {
+    const picked = await openBrowseModal("dir");
+    if (!picked) return;
+    setStatus("Saving llama.cpp folder...");
+    try {
+      await api("/api/llm/folders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ llama_cpp_dir: picked }),
+      });
+      $("llm-cpp-folder").value = picked;
+      setStatus("llama.cpp folder saved.");
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  });
+
+  $("btn-browse-model-file").addEventListener("click", async () => {
+    const picked = await openBrowseModal("file", "Choose the main model file (.gguf)");
+    if (!picked) return;
+    setStatus("Switching model...");
+    try {
+      const result = await api("/api/llm/model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: picked }),
+      });
+      $("llm-model-file").value = result.model_path;
+      $("llm-draft-model-file").value = result.draft_model_path || "";
+      setStatus(result.cleared_draft
+        ? "Model switched. Cleared the speculative-decoding draft model (built for a different model family)."
+        : "Model switched.");
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  });
+
+  $("btn-browse-draft-model-file").addEventListener("click", async () => {
+    const picked = await openBrowseModal("file", "Choose the draft/MTP model file (.gguf)");
+    if (!picked) return;
+    setStatus("Setting draft/MTP model...");
+    try {
+      const result = await api("/api/llm/draft-model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: picked }),
+      });
+      $("llm-draft-model-file").value = result.draft_model_path || "";
+      setStatus(result.family_mismatch
+        ? "Draft/MTP model set - but its family looks different from the main model, which can misbehave or crash the server."
+        : "Draft/MTP model set.", result.family_mismatch);
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  });
+
+  $("btn-clear-draft-model-file").addEventListener("click", async () => {
+    if (!$("llm-draft-model-file").value) return;
+    if (!(await uiConfirm("Clear the draft/MTP model? Speculative decoding will be disabled until you set one again."))) return;
+    setStatus("Clearing draft/MTP model...");
+    try {
+      await api("/api/llm/draft-model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: null }),
+      });
+      $("llm-draft-model-file").value = "";
+      setStatus("Draft/MTP model cleared.");
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  });
 }
 
 // So the review queue's status line can say which chapter a bible-sync task
@@ -3610,7 +3823,6 @@ function describeUniversalTask(task) {
     case "revise_note": return `revise note "${task.target_name}"`;
     case "revise_timeline_event": return `revise timeline event "${task.target_name}"`;
     case "revise_idea": return `revise idea "${task.target_name}"${fromChapter(task)}`;
-    case "resolve_idea": return `mark idea "${task.target_name}" resolved${fromChapter(task)}`;
     case "retire_timeline_event": return `retire stale timeline event "${task.target_name}"${fromChapter(task)}`;
     case "revise_chapter": return `revise chapter ${task.chapter_num}`;
     case "revise_outline_entry": return `update outline chapter ${task.chapter_num}`;
@@ -3680,6 +3892,12 @@ async function dispatchUniversalTask(task) {
       $("idea-title").value = task.payload.title || "";
       $("idea-notes").value = task.payload.notes || "";
       $("idea-is-thread").checked = task.payload.category === "planted_thread";
+      pendingIdeaOriginChapter = task.payload.origin_chapter ?? null;
+      const originEl = $("idea-origin-note");
+      if (originEl) {
+        originEl.textContent = pendingIdeaOriginChapter != null ? `Discovered while finishing Chapter ${pendingIdeaOriginChapter}.` : "";
+        originEl.classList.toggle("hidden", pendingIdeaOriginChapter == null);
+      }
       $("idea-relates-search").value = "";
       refreshIdeaRelatesToOptions(task.payload.linked_kind, task.payload.linked_id);
       setStatus("Draft ready - review and edit before creating.");
@@ -3721,17 +3939,6 @@ async function dispatchUniversalTask(task) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ instruction }),
-    });
-    await refreshBible();
-    renderSidebar();
-    renderEditor();
-    return;
-  }
-  if (task.action === "resolve_idea") {
-    await api(`/api/projects/${encodeURIComponent(state.slug)}/ideas/${task.idea_id}/edit`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "resolved" }),
     });
     await refreshBible();
     renderSidebar();
@@ -4029,9 +4236,9 @@ function timelineProposalTasks(proposals, chapterNum) {
 // that removed/contradicted an event the bible already logged against this
 // same chapter_num - see propose_retirements in timeline_extractor.py and
 // project_ghostwriter_timeline_staleness_gap) into retire_timeline_event
-// tasks. Applied directly on dispatch, same as resolve_idea below - retiring
-// a stale entry isn't new canon needing a diff/approve step, it's undoing a
-// fact the current chapter text no longer supports.
+// tasks. Applied directly on dispatch - retiring a stale entry isn't new
+// canon needing a diff/approve step, it's undoing a fact the current
+// chapter text no longer supports.
 function timelineRetirementTasks(retirements, chapterNum) {
   if (!retirements || !retirements.length) return [];
   return retirements.map((r) => ({
@@ -4060,25 +4267,8 @@ function plantedThreadProposalTasks(proposals, chapterNum) {
     payload: {
       title: `Plant for Chapter ${p.linked_id}`, notes: p.note,
       linked_kind: p.linked_kind || "outline", linked_id: p.linked_id,
-      category: "planted_thread",
+      category: "planted_thread", origin_chapter: chapterNum,
     },
-  }));
-}
-
-// Converts the thread planner's propose_resolutions() output (already-open
-// planted-thread ideas a just-finished chapter appears to pay off) into
-// resolve_idea tasks - review-gated the same way as everything else in the
-// queue, just applied directly on dispatch (see dispatchUniversalTask) since
-// marking an idea resolved has no draft/diff step of its own.
-function resolveProposalTasks(proposals, chapterNum) {
-  if (!proposals || !proposals.length) return [];
-  return proposals.map((p) => ({
-    action: "resolve_idea",
-    instruction: p.reason,
-    target_name: p.title,
-    idea_id: p.idea_id,
-    chapter_num: chapterNum,
-    next_chapter_num: null,
   }));
 }
 
@@ -4089,7 +4279,7 @@ function resolveProposalTasks(proposals, chapterNum) {
 // revise-and-approve (for an existing entry) or draft-and-create (for a
 // brand-new one) review step, or be applied directly - see queueBibleProposals
 // vs autoApplyBibleProposals below.
-function buildBibleProposalTasks(proposals, chapterNum, timelineProposals, threadProposals, resolveProposals, timelineRetirements) {
+function buildBibleProposalTasks(proposals, chapterNum, timelineProposals, threadProposals, timelineRetirements) {
   const tasks = (proposals || []).flatMap((p) => {
     const instruction = p.exists
       ? `Add this newly established fact from Chapter ${chapterNum}: ${p.new_facts}`
@@ -4131,7 +4321,6 @@ function buildBibleProposalTasks(proposals, chapterNum, timelineProposals, threa
     ...timelineProposalTasks(timelineProposals, chapterNum),
     ...timelineRetirementTasks(timelineRetirements, chapterNum),
     ...plantedThreadProposalTasks(threadProposals, chapterNum),
-    ...resolveProposalTasks(resolveProposals, chapterNum),
   ];
 }
 
@@ -4139,8 +4328,8 @@ function buildBibleProposalTasks(proposals, chapterNum, timelineProposals, threa
 // fact-extraction proposals stay review-gated (queued, modal-driven) since
 // they're speculative new canon pulled from prose, not a targeted fix - see
 // project_ghostwriter_finalize_approval_boundaries.
-function queueBibleProposals(proposals, chapterNum, timelineProposals, threadProposals, resolveProposals, timelineRetirements) {
-  const tasks = buildBibleProposalTasks(proposals, chapterNum, timelineProposals, threadProposals, resolveProposals, timelineRetirements);
+function queueBibleProposals(proposals, chapterNum, timelineProposals, threadProposals, timelineRetirements) {
+  const tasks = buildBibleProposalTasks(proposals, chapterNum, timelineProposals, threadProposals, timelineRetirements);
   if (!tasks.length) return false;
   return enqueueUniversalTasks(tasks);
 }
@@ -4153,8 +4342,8 @@ function queueBibleProposals(proposals, chapterNum, timelineProposals, threadPro
 // turns up along the way (see project_ghostwriter_finalize_approval_boundaries).
 // Applies best-effort: one bad proposal is reported and skipped rather than
 // aborting the rest of the batch. Returns the number of proposals applied.
-async function autoApplyBibleProposals(proposals, chapterNum, timelineProposals, threadProposals, resolveProposals, timelineRetirements) {
-  const tasks = buildBibleProposalTasks(proposals, chapterNum, timelineProposals, threadProposals, resolveProposals, timelineRetirements);
+async function autoApplyBibleProposals(proposals, chapterNum, timelineProposals, threadProposals, timelineRetirements) {
+  const tasks = buildBibleProposalTasks(proposals, chapterNum, timelineProposals, threadProposals, timelineRetirements);
   let applied = 0;
   for (const task of tasks) {
     try {
@@ -4215,7 +4404,7 @@ async function autoApplyUniversalTask(task) {
     renderSidebar();
     return;
   }
-  if (task.action === "resolve_idea" || task.action === "retire_timeline_event") {
+  if (task.action === "retire_timeline_event") {
     await dispatchUniversalTask(task);
     return;
   }

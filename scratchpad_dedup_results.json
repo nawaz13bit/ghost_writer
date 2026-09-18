@@ -1,0 +1,179 @@
+[
+  {
+    "chapter": 3,
+    "kept": 6,
+    "deleted": [
+      2
+    ]
+  },
+  {
+    "chapter": 5,
+    "kept": 13,
+    "deleted": [
+      14
+    ]
+  },
+  {
+    "chapter": 9,
+    "kept": 20,
+    "deleted": [
+      22,
+      26
+    ]
+  },
+  {
+    "chapter": 17,
+    "kept": 52,
+    "deleted": [
+      54,
+      57,
+      60
+    ]
+  },
+  {
+    "chapter": 22,
+    "kept": 81,
+    "deleted": [
+      75,
+      76
+    ]
+  },
+  {
+    "chapter": 25,
+    "kept": 91,
+    "deleted": [
+      86
+    ]
+  },
+  {
+    "chapter": 28,
+    "kept": 95,
+    "deleted": [
+      102
+    ]
+  },
+  {
+    "chapter": 30,
+    "kept": 105,
+    "deleted": [
+      103,
+      107
+    ]
+  },
+  {
+    "chapter": 32,
+    "kept": 114,
+    "deleted": [
+      117
+    ]
+  },
+  {
+    "chapter": 33,
+    "kept": 119,
+    "deleted": [
+      120,
+      121
+    ]
+  },
+  {
+    "chapter": 35,
+    "kept": 125,
+    "deleted": [
+      130
+    ]
+  },
+  {
+    "chapter": 36,
+    "kept": 129,
+    "deleted": [
+      131
+    ]
+  },
+  {
+    "chapter": 40,
+    "kept": 147,
+    "deleted": [
+      143,
+      146
+    ]
+  },
+  {
+    "chapter": 51,
+    "kept": 194,
+    "deleted": [
+      191
+    ]
+  },
+  {
+    "chapter": 53,
+    "kept": 195,
+    "deleted": [
+      196
+    ]
+  },
+  {
+    "chapter": 59,
+    "kept": 224,
+    "deleted": [
+      218,
+      219
+    ]
+  },
+  {
+    "chapter": 62,
+    "kept": 235,
+    "deleted": [
+      237
+    ]
+  },
+  {
+    "chapter": 65,
+    "kept": 247,
+    "deleted": [
+      250
+    ]
+  },
+  {
+    "chapter": 67,
+    "kept": 255,
+    "deleted": [
+      258
+    ]
+  },
+  {
+    "chapter": 68,
+    "kept": 253,
+    "deleted": [
+      254,
+      256,
+      257,
+      260
+    ]
+  },
+  {
+    "chapter": 72,
+    "kept": 271,
+    "deleted": [
+      273,
+      275,
+      276,
+      277
+    ]
+  },
+  {
+    "chapter": 76,
+    "kept": 285,
+    "deleted": [
+      293
+    ]
+  },
+  {
+    "chapter": 79,
+    "kept": 302,
+    "deleted": [
+      294,
+      295,
+      303
+    ]
+  }
+]

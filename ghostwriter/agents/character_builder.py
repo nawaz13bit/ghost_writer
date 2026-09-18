@@ -16,7 +16,8 @@ physical/behavioral details an author needs for consistency - 3-6 sentences)."""
 class CharacterBuilderAgent(Agent):
     system_prompt = SYSTEM_PROMPT
 
-    def build(self, bible: StoryBible) -> None:
+    def build(self, bible: StoryBible, voice_prompt: str | None = None) -> None:
+        system_prompt = f"{voice_prompt}\n\n{self.system_prompt}" if voice_prompt else self.system_prompt
         engine_brief = bible.story_engine_brief()
         engine_section = f"\n{engine_brief}\n" if engine_brief else ""
         prompt = f"""Book title: {bible.data['title']}
@@ -37,14 +38,15 @@ characters or a new threat) with distinct voices and concrete arcs.
 Respond with ONLY a JSON array like:
 [{{"name": "...", "role": "...", "description": "..."}}, ...]"""
 
-        characters = self.ask_json(prompt)
+        characters = self.ask_json(prompt, system_prompt=system_prompt)
         for c in characters:
             bible.add_character(c["name"], c["role"], c["description"])
 
-    def suggest_one(self, bible: StoryBible, freeform: str) -> dict:
+    def suggest_one(self, bible: StoryBible, freeform: str, voice_prompt: str | None = None) -> dict:
         """Drafts a single new character from a freeform description, for the
         writer to review/edit before saving - used by the "describe it, let
         AI fill the fields" New Character flow."""
+        system_prompt = f"{voice_prompt}\n\n{self.system_prompt}" if voice_prompt else self.system_prompt
         engine_brief = bible.story_engine_brief()
         engine_section = f"\n{engine_brief}\n" if engine_brief else ""
         prompt = f"""Book title: {bible.data['title']}
@@ -63,7 +65,7 @@ Draft this ONE character with a distinct voice and concrete arc, filling in
 only what's needed to make the entry usable without contradicting what the
 writer wrote. Respond with ONLY a single JSON object like:
 {{"name": "...", "role": "...", "description": "..."}}"""
-        result = self.ask_json(prompt)
+        result = self.ask_json(prompt, system_prompt=system_prompt)
         if isinstance(result, list):
             result = result[0]
         return result
@@ -75,12 +77,14 @@ writer wrote. Respond with ONLY a single JSON object like:
         unlock_chapter_num: int,
         section: str | None = None,
         freeform: str = "",
+        voice_prompt: str | None = None,
     ) -> dict:
         """Drafts a plot-gated reveal for this character - a fact appropriate
         to surface once the given outline chapter is reached - for the writer
         to review/edit before saving. Uses that chapter's outline plus the
         character's established sections and already-planned reveals so it
         doesn't repeat or contradict anything."""
+        system_prompt = f"{voice_prompt}\n\n{self.system_prompt}" if voice_prompt else self.system_prompt
         entry = bible.outline_entry(unlock_chapter_num)
         chapter_context = ""
         if entry:
@@ -123,7 +127,7 @@ Respond with ONLY a single JSON object like:
 where "section" is one of {list(self.SECTION_LABELS)} (whichever section this
 fact would eventually update) or "" if it's a general plot fact not tied to
 one of those sections."""
-        result = self.ask_json_object(prompt)
+        result = self.ask_json_object(prompt, system_prompt=system_prompt)
         return {
             "text": (result.get("text") or "").strip(),
             "section": (result.get("section") or "").strip(),
@@ -138,12 +142,13 @@ one of those sections."""
         "arc": "Arc",
     }
 
-    def draft_sections(self, bible: StoryBible, character: dict) -> dict:
+    def draft_sections(self, bible: StoryBible, character: dict, voice_prompt: str | None = None) -> dict:
         """Drafts only the currently-empty structured sections (appearance,
         personality, background, goals/motivation, relationships, arc) for
         a character, using its description and any already-filled sections
         as context so it doesn't contradict them. Returns a dict of just the
         newly-drafted sections - the writer reviews/edits before saving."""
+        system_prompt = f"{voice_prompt}\n\n{self.system_prompt}" if voice_prompt else self.system_prompt
         existing = character.get("sections") or {}
         missing = [k for k in StoryBible.CHARACTER_SECTION_KEYS if not (existing.get(k) or "").strip()]
         if not missing:
@@ -169,11 +174,12 @@ description and any already-filled sections above.
 Respond with ONLY a single JSON object with exactly these keys: {missing},
 like {{"{missing[0]}": "..."}}"""
 
-        result = self.ask_json_object(prompt)
+        result = self.ask_json_object(prompt, system_prompt=system_prompt)
         return {k: result[k] for k in missing if isinstance(result.get(k), str) and result[k].strip()}
 
     def resync_sections(
-        self, bible: StoryBible, character: dict, new_facts: str, chapter_num: int | None = None
+        self, bible: StoryBible, character: dict, new_facts: str, chapter_num: int | None = None,
+        voice_prompt: str | None = None,
     ) -> dict:
         """Given a newly-established fact about this character (from a
         finalized chapter), drafts UPDATED text for whichever structured
@@ -192,6 +198,7 @@ like {{"{missing[0]}": "..."}}"""
         rather than as the newest development, and avoid overwriting a
         chronologically-later detail that's already reflected in the
         section."""
+        system_prompt = f"{voice_prompt}\n\n{self.system_prompt}" if voice_prompt else self.system_prompt
         existing = character.get("sections") or {}
         filled = {k: v for k, v in existing.items() if (v or "").strip()}
         all_keys = list(self.SECTION_LABELS)
@@ -237,5 +244,5 @@ respond with {{}}.
 Respond with ONLY a JSON object using a subset of these keys: {all_keys},
 like {{"{all_keys[0]}": "..."}}"""
 
-        result = self.ask_json_object(prompt)
+        result = self.ask_json_object(prompt, system_prompt=system_prompt)
         return {k: result[k] for k in all_keys if isinstance(result.get(k), str) and result[k].strip()}

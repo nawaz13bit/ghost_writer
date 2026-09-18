@@ -197,6 +197,7 @@ class StoryBible:
             c.setdefault("reveals", [])
         for idea in data.get("ideas", []):
             idea.setdefault("category", None)
+            idea.setdefault("origin_chapter", None)
         for entry in data.get("outline", []):
             _migrate_outline_entry(entry)
         _validate_data(data, str(path))
@@ -624,12 +625,13 @@ class StoryBible:
     def add_idea(
         self, title: str, notes: str = "",
         linked_kind: str | None = None, linked_id: Any = None,
-        category: str | None = None,
+        category: str | None = None, origin_chapter: int | None = None,
     ) -> dict[str, Any]:
         next_id = max((i["id"] for i in self.data["ideas"]), default=0) + 1
         idea = {
             "id": next_id, "title": title, "notes": notes, "created_at": time.time(),
             "linked_kind": linked_kind, "linked_id": linked_id, "category": category,
+            "origin_chapter": origin_chapter,
             "status": "open",
         }
         self.data["ideas"].append(idea)
@@ -694,8 +696,15 @@ class StoryBible:
     # human review each revision and explicitly decide when a chapter (or
     # bible entry) is "final", instead of the pipeline auto-finalizing it.
     def add_chapter_revision(
-        self, chapter_num: int, text: str, source: str, instruction: str | None = None
+        self, chapter_num: int, text: str, source: str, instruction: str | None = None,
+        idea_id: int | None = None,
     ) -> dict[str, Any]:
+        """idea_id links this revision to an idea being integrated (see
+        [[project_ghostwriter_idea_integration_feature]]-style "Integrate into
+        chapter" flow): recorded on the chapter's pending_idea_ids so
+        approve_chapter can resolve it durably server-side once the writer
+        approves this specific revision, instead of relying on transient
+        client-side state that a browser refresh mid-finalize would lose."""
         ch = self.get_chapter(chapter_num)
         if ch is None:
             self.upsert_chapter(chapter_num, history=[])
@@ -709,8 +718,24 @@ class StoryBible:
             "created_at": time.time(),
         }
         history.append(entry)
+        if idea_id is not None:
+            pending = ch.setdefault("pending_idea_ids", [])
+            if idea_id not in pending:
+                pending.append(idea_id)
         self.save()
         return entry
+
+    def link_idea_to_outline(self, chapter_num: int, idea_id: int) -> None:
+        """Records that an idea was folded into an undrafted chapter's outline
+        summary ("Integrate into outline"), so it resolves once that chapter
+        is eventually drafted and approved - see approve_chapter."""
+        entry = self.outline_entry(chapter_num)
+        if entry is None:
+            raise ValueError(f"No outline entry for chapter {chapter_num}")
+        pending = entry.setdefault("pending_idea_ids", [])
+        if idea_id not in pending:
+            pending.append(idea_id)
+        self.save()
 
     def approve_chapter(self, chapter_num: int, text: str) -> None:
         """(Re-)finalizes a chapter. Approval is not a lock - re-approving an
@@ -729,7 +754,14 @@ class StoryBible:
 
         needs_recheck_from records which chapter_num(s) triggered the flag,
         so the UI can point the writer at the specific chapter to compare
-        against instead of a bare "something changed" warning."""
+        against instead of a bare "something changed" warning.
+
+        Also resolves any ideas pending on this chapter (from an "Integrate
+        into chapter" revision) or on its outline entry (from an "Integrate
+        into outline" note, now finally drafted+approved) - this runs
+        server-side as part of approval itself, so it can't be lost by a
+        browser refresh during the slow finalize pipeline the way the old
+        client-only pendingIdeaIntegration flag could."""
         self.upsert_chapter(chapter_num, final=text, approved=True)
         for ch in self.data["chapters"]:
             if ch["chapter_num"] > chapter_num and ch.get("approved"):
@@ -737,7 +769,22 @@ class StoryBible:
                 triggers = ch.get("needs_recheck_from") or []
                 if chapter_num not in triggers:
                     ch["needs_recheck_from"] = sorted(triggers + [chapter_num])
+        resolved_ideas: list[dict[str, Any]] = []
+        ch = self.get_chapter(chapter_num)
+        entry = self.outline_entry(chapter_num)
+        pending_ids = list((ch.get("pending_idea_ids") or []) if ch else [])
+        pending_ids += list((entry.get("pending_idea_ids") or []) if entry else [])
+        for idea_id in dict.fromkeys(pending_ids):
+            idea = self.get_idea(idea_id)
+            if idea is not None and idea.get("status") != "resolved":
+                idea["status"] = "resolved"
+                resolved_ideas.append(idea)
+        if ch is not None:
+            ch["pending_idea_ids"] = []
+        if entry is not None:
+            entry["pending_idea_ids"] = []
         self.save()
+        return resolved_ideas
 
     # -- translation (post-finalization final pass) --------------------------
     # A separate per-language field on each chapter, distinct from history/

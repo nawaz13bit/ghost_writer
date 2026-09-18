@@ -44,7 +44,10 @@ def plan_scenes(slug: str, chapter_num: int, req: PlanScenesRequest | None = Non
         raise HTTPException(404, f"No outline entry for chapter {chapter_num}")
     instruction = req.instruction.strip() if req and req.instruction and req.instruction.strip() else None
     try:
-        return outliner.plan_scenes(bible, chapter_num, extra_instruction=instruction)
+        author = get_author(bible)
+        return outliner.plan_scenes(
+            bible, chapter_num, extra_instruction=instruction, voice_prompt=author.system_prompt
+        )
     except AIOutputError as exc:
         logger.exception("Scene planning failed for project %r chapter %s", slug, chapter_num)
         raise HTTPException(502, f"The AI returned an unexpected response ({exc}) - try again.")
@@ -170,9 +173,11 @@ def _run_scene_revise_job(job_id: str, slug: str, chapter_num: int, scene_num: i
         text = scene.get("draft") or ""
         if not text:
             raise ValueError("Scene has no draft yet")
+        author = get_author(bible)
         new_text = reviser.revise(
             f"scene {scene_num} of chapter {chapter_num} of the novel", text, instruction,
             on_delta=lambda partial: job.__setitem__("partial_text", partial),
+            voice_prompt=author.system_prompt,
         )
         new_text = _guard_rewrite(text, new_text, "Scene revise")
         revision = bible.add_scene_revision(chapter_num, scene_num, new_text, source="instruction", instruction=instruction)

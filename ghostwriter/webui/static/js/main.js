@@ -4,14 +4,15 @@
 import { $, clearTouched, emergencyStopLLM, setStatus, wireClick } from "./api.js";
 import {
   advanceUniversalQueue, applyOutlineRevision, cancelBulkFix, checkConsistency, closeDrawer,
-  closeEntityModal, closeIdeaModal, closeIntegrateIdeaModal, closeOutlineModal, closeReviseOutlineModal, createEntity,
-  createOutlineEntry, draftFromScenes, draftMissingCharacterSections, draftOutlineRevision, integrateIdeaIntoChapter,
+  closeEntityModal, closeIdeaModal, closeIntegrateIdeaModal, closeIntegrateIdeaOutlineModal, closeOutlineModal, closeReviseOutlineModal, createEntity,
+  createOutlineEntry, draftFromScenes, draftMissingCharacterSections, draftOutlineRevision, ideaModalIntegrateChapter, ideaModalIntegrateOutline,
+  ideaModalPromote, integrateIdeaIntoChapter, integrateIdeaIntoOutline,
   migrateImportNotes, planScenesWithAI,
-  loadLlmModels, loadLlmFolders, saveLlmFolders, openReviseOutlineModal, pollLlmStatus, renameEntity, reviseEngine, generateBlurb,
+  loadLlmFolders, wireBrowseModal, openReviseOutlineModal, pollLlmStatus, renameEntity, reviseEngine, generateBlurb,
   reviseWithInstruction, runUniversalPrompt, saveAllCharacterSections, saveCharacterFactions, addCharacterReveal, suggestCharacterReveal, filterIdeaRelatesTo, saveIdea, saveManualEdit, savePrompt,
   clearTimelineConsequence, saveTimelineConsequence, saveTimelinePlacement, addTimelineCrosspoint, saveWorldCategory, saveWorldIsReal, saveWorldObjects,
   setPaneView, showPromptFor, showReviseOutlineStep, skipRemainingUniversalTasks,
-  startLlm, stopLlm, switchModel, suggestEntity, suggestOutlineEntry,
+  startLlm, stopLlm, suggestEntity, suggestOutlineEntry,
   setUniversalMode, clearUniversalDiscuss, useDiscussSuggestion, translateBook,
   loadTranslateLanguages, translateChapter,
 } from "./editor.js";
@@ -66,10 +67,8 @@ $("btn-settings-close").addEventListener("click", () => setActiveTab("manuscript
 $("btn-start-llm").addEventListener("click", () => startLlm());
 $("btn-stop-llm").addEventListener("click", () => stopLlm());
 $("btn-emergency-stop").addEventListener("click", () => { emergencyStopLLM(); cancelBulkFix(); });
-wireClick("btn-switch-model", switchModel);
-wireClick("btn-save-llm-folders", saveLlmFolders);
+wireBrowseModal();
 pollLlmStatus();
-loadLlmModels().catch(() => {});
 loadLlmFolders().catch(() => {});
 setInterval(pollLlmStatus, 5000);
 
@@ -166,9 +165,14 @@ wireClick("ne-suggest", suggestEntity);
 
 $("idea-cancel").addEventListener("click", closeIdeaModal);
 wireClick("idea-save", saveIdea);
+wireClick("idea-promote-btn", ideaModalPromote);
+wireClick("idea-integrate-chapter-btn", ideaModalIntegrateChapter);
+wireClick("idea-integrate-outline-btn", ideaModalIntegrateOutline);
 
 $("ii-cancel").addEventListener("click", closeIntegrateIdeaModal);
 wireClick("ii-integrate", integrateIdeaIntoChapter);
+$("iio-cancel").addEventListener("click", closeIntegrateIdeaOutlineModal);
+wireClick("iio-integrate", integrateIdeaIntoOutline);
 
 $("oo-cancel").addEventListener("click", closeOutlineModal);
 wireClick("oo-create", createOutlineEntry);

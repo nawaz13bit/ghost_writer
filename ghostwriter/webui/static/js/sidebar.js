@@ -9,7 +9,7 @@
 // editor.js's own renameEntity()/deleteEntity() are wired to drawer state
 // (state.selection + drawer inputs) rather than being callable standalone.
 import { $, api, kindLabel, markTouched, setStatus, state, uiConfirm, uiPrompt } from "./api.js";
-import { chapterStatusBadge, checkConsistencyForItem, closeDrawer, entityStatusBadge, getChapter, ideaStatusBadge, linkedIdeasFor, openEntityModal, openIdeaModal, openIntegrateIdeaModal, openOutlineModal, openPromoteIdeaModal, renderEditor, selectItem, setNewEntityCategory } from "./editor.js";
+import { chapterStatusBadge, checkConsistencyForItem, closeDrawer, entityStatusBadge, getChapter, ideaStatusBadge, linkedIdeasFor, openEntityModal, openIdeaModal, openOutlineModal, renderEditor, selectItem, setNewEntityCategory } from "./editor.js";
 import { selectChapter } from "./manuscript.js";
 import { refreshBible } from "./projects.js";
 import { setActiveTab } from "./tabs.js";
@@ -40,6 +40,7 @@ function toEntityKind(branchKey) {
 
 const collapsed = new Set();
 const collapsedActs = new Set();
+let ideasResolvedCollapsed = true;
 let timelineTrackFilter = ""; // "" = all tracks; "" also matches events with no track set
 
 export function showSidebar() {
@@ -56,7 +57,7 @@ export function hideSidebar() {
 function leavesFor(branchKey) {
   if (branchKey === "ideas") {
     return (state.bible.ideas || []).slice().sort((a, b) => a.id - b.id)
-      .map(e => ({ id: e.id, name: e.title, record: e }));
+      .map(e => ({ id: e.id, name: e.origin_chapter != null ? `${e.title} (found in Ch.${e.origin_chapter})` : e.title, record: e }));
   }
   if (branchKey === "outline") {
     return (state.bible.outline || []).slice().sort((a, b) => a.chapter_num - b.chapter_num)
@@ -216,13 +217,44 @@ async function deleteIdeaLeaf(ideaId, title) {
   setStatus("Deleted.");
 }
 
+// Manual counterpart to the "Integrate into chapter/outline" flows above: for
+// an idea that was already woven into the manuscript some other way (written
+// by hand, integrated before this app tracked idea resolution server-side, etc.),
+// the writer can assert directly that it's done rather than re-running an AI
+// pass just to trigger the gate. Reopen is the symmetric undo.
+async function markIdeaResolvedLeaf(ideaId, title) {
+  if (!(await uiConfirm(`Mark idea "${title}" resolved? Use this when it's already been woven into the manuscript some other way - it won't touch any chapter text.`))) return;
+  setStatus("Marking resolved...");
+  await api(`/api/projects/${encodeURIComponent(state.slug)}/ideas/${ideaId}/edit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "resolved" }),
+  });
+  await refreshBible();
+  renderSidebar();
+  setStatus(`"${title}" marked resolved.`);
+}
+
+async function reopenIdeaLeaf(ideaId, title) {
+  if (!(await uiConfirm(`Reopen idea "${title}"?`))) return;
+  setStatus("Reopening...");
+  await api(`/api/projects/${encodeURIComponent(state.slug)}/ideas/${ideaId}/edit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "open" }),
+  });
+  await refreshBible();
+  renderSidebar();
+  setStatus(`"${title}" reopened.`);
+}
+
 function jumpToOutlineLeaf(chapterNum) {
   setActiveTab("manuscript");
   selectChapter(chapterNum);
 }
 
 function closeLeafMenus() {
-  for (const m of document.querySelectorAll(".sb-leaf-menu.open")) m.classList.remove("open");
+  for (const m of document.querySelectorAll(".sb-leaf-menu.open")) { m.classList.remove("open"); m.classList.add("hidden"); }
 }
 document.addEventListener("click", closeLeafMenus);
 
@@ -305,15 +337,23 @@ function buildLeaf(branchKey, leaf) {
   menu.className = "sb-leaf-menu hidden dropdown-menu";
 
   if (branchKey === "ideas") {
-    const promote = document.createElement("button");
-    promote.textContent = "Promote to outline";
-    promote.addEventListener("click", () => { closeLeafMenus(); openPromoteIdeaModal(leaf.record); });
-    menu.appendChild(promote);
-    const integrate = document.createElement("button");
-    integrate.textContent = "Integrate into chapter";
-    integrate.title = "Have the AI revise a drafted chapter to weave this idea in (review/approve like any other revision).";
-    integrate.addEventListener("click", () => { closeLeafMenus(); openIntegrateIdeaModal(leaf.record); });
-    menu.appendChild(integrate);
+    // Promote/Integrate-into-chapter/Integrate-into-outline moved into the
+    // idea's own edit modal (openIdeaModal, editor.js) as visible buttons -
+    // burying them in this kebab wasn't discoverable. Mark resolved/Reopen/
+    // Delete stay here since they're secondary, not the primary resolution
+    // paths.
+    if ((leaf.record.status || "open") === "open") {
+      const markResolved = document.createElement("button");
+      markResolved.textContent = "Mark resolved";
+      markResolved.title = "Already woven into the manuscript some other way? Mark it resolved directly, without an AI revision pass.";
+      markResolved.addEventListener("click", () => { closeLeafMenus(); markIdeaResolvedLeaf(leaf.record.id, leaf.record.title); });
+      menu.appendChild(markResolved);
+    } else {
+      const reopen = document.createElement("button");
+      reopen.textContent = "Reopen";
+      reopen.addEventListener("click", () => { closeLeafMenus(); reopenIdeaLeaf(leaf.record.id, leaf.record.title); });
+      menu.appendChild(reopen);
+    }
     const del = document.createElement("button");
     del.textContent = "Delete";
     del.addEventListener("click", () => { closeLeafMenus(); deleteIdeaLeaf(leaf.id, leaf.name); });
@@ -382,12 +422,46 @@ function buildActGroup(act, leaves) {
   return wrap;
 }
 
+// Resolved ideas (status "resolved", set when a thread-resolution sweep or
+// "Integrate into chapter" closes one out) stay in the backlog instead of
+// disappearing - deleting is still a separate explicit action - but they're
+// done, so they're tucked into a collapsed "Resolved" group under the open
+// ones rather than cluttering the main list.
+function buildIdeasResolvedGroup(leaves) {
+  const wrap = document.createElement("div");
+  wrap.className = "sb-act-group";
+  const list = document.createElement("div");
+  list.className = "sb-act-leaves";
+  if (ideasResolvedCollapsed) list.classList.add("hidden");
+  for (const leaf of leaves) list.appendChild(buildLeaf("ideas", leaf));
+
+  const row = document.createElement("div");
+  row.className = "sb-act-heading";
+  const caret = document.createElement("span");
+  caret.className = "sb-act-caret";
+  caret.textContent = ideasResolvedCollapsed ? "▸" : "▾";
+  caret.addEventListener("click", (e) => {
+    e.stopPropagation();
+    ideasResolvedCollapsed = !ideasResolvedCollapsed;
+    caret.textContent = ideasResolvedCollapsed ? "▸" : "▾";
+    list.classList.toggle("hidden", ideasResolvedCollapsed);
+  });
+  row.appendChild(caret);
+  const label = document.createElement("span");
+  label.className = "sb-act-label";
+  label.textContent = `Resolved (${leaves.length})`;
+  label.addEventListener("click", () => caret.dispatchEvent(new Event("click", { bubbles: false })));
+  row.appendChild(label);
+
+  wrap.appendChild(row);
+  wrap.appendChild(list);
+  return wrap;
+}
+
 export function renderSidebar() {
   renderOneSidebar("tree-sidebar", LEFT_BRANCHES);
   renderOneSidebar("entity-sidebar", RIGHT_BRANCHES);
-  renderIdeaSweepLink();
   renderRailContinuityDot();
-  renderResearchSweepLink();
   renderBibliographyLink();
   renderCritiqueLink();
 }
@@ -451,48 +525,39 @@ function renderCritiqueLink() {
 // Whole-book idea sweep (forward-seeding/payoff pass over every drafted
 // chapter) used to be a section buried inside the Continuity dashboard,
 // which made it easy to miss since it isn't a continuity/consistency check -
-// it's its own pass over a different bucket (the idea backlog). Standalone
-// link like Continuity/Bibliography/Critique above. Distinct from the
-// left-sidebar "Ideas" branch, which lists individual idea leaves - this is
-// just the entry point for the whole-book sweep action.
-function renderIdeaSweepLink() {
-  const root = $("tree-sidebar");
-  if (!root || !state.slug) return;
-  const section = document.createElement("div");
-  section.className = "sb-branch";
-  const head = document.createElement("div");
-  head.className = "sb-branch-head";
-  const title = document.createElement("span");
-  title.className = "sb-branch-title";
-  title.textContent = "Idea sweep";
-  head.appendChild(title);
-  head.addEventListener("click", () => selectItem("overview", "ideas"));
-  section.appendChild(head);
-  root.appendChild(section);
+// it's its own pass over a different bucket (the idea backlog). Then briefly
+// its own standalone top-level sidebar link; now folded directly into the
+// Ideas branch (as its first row) since that's the bucket it acts on - one
+// less top-level section, and it's found exactly where a writer looking at
+// ideas would expect it.
+function buildIdeaSweepRow() {
+  const row = document.createElement("div");
+  row.className = "sb-leaf sb-idea-sweep-row";
+  const name = document.createElement("span");
+  name.className = "sb-leaf-name";
+  name.textContent = "Sweep whole book for ideas";
+  row.appendChild(name);
+  row.addEventListener("click", () => selectItem("overview", "ideas"));
+  return row;
 }
 
-// Whole-book research sweep - same rationale as renderIdeaSweepLink above,
-// moved out of the Continuity dashboard. Left ungated (unlike Bibliography,
-// which only makes sense for nonfiction): a fiction book can still reference
-// real places/facts - a spy novel, a romance set in Paris - without the
-// writer having ticked "Set in the real world" in Overview, so hiding the
-// link behind that flag would bury it exactly for the books that need it.
-// The sweep itself is a no-op (finds nothing) for a fully invented setting;
-// the pane's own copy says so.
-function renderResearchSweepLink() {
-  const root = $("entity-sidebar");
-  if (!root || !state.slug) return;
-  const section = document.createElement("div");
-  section.className = "sb-branch";
-  const head = document.createElement("div");
-  head.className = "sb-branch-head";
-  const title = document.createElement("span");
-  title.className = "sb-branch-title";
-  title.textContent = "Research sweep";
-  head.appendChild(title);
-  head.addEventListener("click", () => selectItem("overview", "research"));
-  section.appendChild(head);
-  root.appendChild(section);
+// Whole-book research sweep - same move as the idea sweep above: folded into
+// the Research notes branch (its first row) instead of a standalone
+// top-level link. Left ungated (unlike Bibliography, which only makes sense
+// for nonfiction): a fiction book can still reference real places/facts - a
+// spy novel, a romance set in Paris - without the writer having ticked "Set
+// in the real world" in Overview, so hiding the row behind that flag would
+// bury it exactly for the books that need it. The sweep itself is a no-op
+// (finds nothing) for a fully invented setting; the pane's own copy says so.
+function buildResearchSweepRow() {
+  const row = document.createElement("div");
+  row.className = "sb-leaf sb-idea-sweep-row";
+  const name = document.createElement("span");
+  name.className = "sb-leaf-name";
+  name.textContent = "Sweep whole book for research";
+  row.appendChild(name);
+  row.addEventListener("click", () => selectItem("overview", "research"));
+  return row;
 }
 
 function renderOneSidebar(rootId, branches) {
@@ -567,6 +632,9 @@ function renderOneSidebar(rootId, branches) {
       });
       list.appendChild(filterSel);
     }
+    if (branch.key === "ideas") list.appendChild(buildIdeaSweepRow());
+    if (branch.key === "research_notes") list.appendChild(buildResearchSweepRow());
+
     if (!leaves.length) {
       const empty = document.createElement("div");
       empty.className = "sb-empty";
@@ -588,6 +656,18 @@ function renderOneSidebar(rootId, branches) {
       flushAct();
       const emptyActs = (state.bible.acts || []).map(a => a.name).filter(name => !seenActs.has(name));
       for (const act of emptyActs) list.appendChild(buildActGroup(act, []));
+    } else if (branch.key === "ideas") {
+      const open = leaves.filter(l => l.record.status !== "resolved");
+      const resolved = leaves.filter(l => l.record.status === "resolved");
+      if (!open.length) {
+        const empty = document.createElement("div");
+        empty.className = "sb-empty";
+        empty.textContent = "Nothing yet.";
+        list.appendChild(empty);
+      } else {
+        for (const leaf of open) list.appendChild(buildLeaf("ideas", leaf));
+      }
+      if (resolved.length) list.appendChild(buildIdeasResolvedGroup(resolved));
     } else {
       for (const leaf of leaves) list.appendChild(buildLeaf(branch.key, leaf));
     }
